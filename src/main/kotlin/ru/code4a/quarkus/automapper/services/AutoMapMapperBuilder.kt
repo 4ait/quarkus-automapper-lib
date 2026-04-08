@@ -19,6 +19,7 @@ import ru.code4a.quarkus.automapper.meta.interfaces.ObjectByIdGetter
 import ru.code4a.quarkus.automapper.meta.interfaces.ObjectByInputUpdater
 import ru.code4a.quarkus.automapper.meta.interfaces.ObjectFieldByInputUpdater
 import ru.code4a.quarkus.automapper.utils.nullable.unwrapElseError
+import ru.code4a.quarkus.automapper.utils.reflection.getReadableName
 import ru.code4a.quarkus.automapper.utils.reflection.bean.KotlinBeanField
 import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanGettersFields
 import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanSettersFields
@@ -39,6 +40,8 @@ class AutoMapMapperBuilder {
     inputAutomapKClass: KClass<*>,
     mapperKClass: KClass<*>
   ): ObjectByInputUpdater {
+    val inputClassName = inputAutomapKClass.getReadableName()
+
     val objectFieldGetters =
       objectKClass.getBeanGettersFields()
 
@@ -105,7 +108,10 @@ class AutoMapMapperBuilder {
               .find {
                 it.name == getterName
               }
-              ?: throw FieldCannotBeUpdatedInputAutomapperException(inputGetterField.name)
+              ?: throw FieldCannotBeUpdatedInputAutomapperException(
+                fieldName = inputGetterField.name,
+                className = inputClassName
+              )
 
           // TODO: objectGetter.function.validateCallAccess()
 
@@ -156,12 +162,18 @@ class AutoMapMapperBuilder {
                                           obj: Any,
                                           inputValue: Any? ->
                 if (inputValue == null) {
-                  throw FieldCannotBeNullInputAutomapperException(inputFieldGetter.name)
+                  throw FieldCannotBeNullInputAutomapperException(
+                    fieldName = inputFieldGetter.name,
+                    className = inputClassName
+                  )
                 }
 
                 val existingValue =
                   objectGetter.function.call(obj)
-                    ?: throw CannotUpdateEntityInEmptyFieldInputAutomapperException(inputFieldGetter.name)
+                    ?: throw CannotUpdateEntityInEmptyFieldInputAutomapperException(
+                      fieldName = inputFieldGetter.name,
+                      className = inputClassName
+                    )
 
                 autoMapper
                   .internalUpdateObjectByInput(
@@ -191,7 +203,10 @@ class AutoMapMapperBuilder {
                                           obj: Any,
                                           inputValue: Any? ->
                 if (inputValue == null && !setterRequiredParameterCanBeNullable) {
-                  throw FieldCannotBeNullInputAutomapperException(inputFieldGetter.name)
+                  throw FieldCannotBeNullInputAutomapperException(
+                    fieldName = inputFieldGetter.name,
+                    className = inputClassName
+                  )
                 }
 
                 val entityValue =

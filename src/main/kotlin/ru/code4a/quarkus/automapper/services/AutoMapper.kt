@@ -7,6 +7,7 @@ import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpec
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpecTo
 import ru.code4a.quarkus.automapper.meta.InputClassInfo
 import ru.code4a.quarkus.automapper.utils.nullable.unwrapElseError
+import ru.code4a.quarkus.automapper.utils.reflection.getReadableName
 import kotlin.reflect.KClass
 import kotlin.reflect.KParameter
 
@@ -186,6 +187,8 @@ class AutoMapper(
     inputClassInfo: InputClassInfo,
     input: Any
   ): Any {
+    val inputClassName = input::class.getReadableName()
+
     val inputCreateInfo =
       inputClassInfo
         .inputCreateInfo
@@ -230,7 +233,10 @@ class AutoMapper(
         val value = inputFieldGetter.function.call(input)
 
         if (value == null && !objectCreateParameter.type.isMarkedNullable) {
-          throw FieldCannotBeNullInputAutomapperException(inputFieldGetter.name)
+          throw FieldCannotBeNullInputAutomapperException(
+            fieldName = inputFieldGetter.name,
+            className = inputClassName
+          )
         }
 
         methodArgs[objectCreateParameter] =
@@ -241,13 +247,19 @@ class AutoMapper(
             input = value
           )
       } else if (!objectCreateParameter.isOptional) {
-        throw MissingRequiredFieldInputAutomapperException(inputFieldGetter.name)
+        throw MissingRequiredFieldInputAutomapperException(
+          fieldName = inputFieldGetter.name,
+          className = inputClassName
+        )
       }
     }
 
     notUsedInputPropertiesByBuildFieldNameSet.forEach { (t, inputCreateFieldInfo) ->
       if (true) { // TODO: isSetterCalled
-        throw FieldIsNotSupportedForCreateInputAutomapperException(inputCreateFieldInfo.inputFieldGetter.name)
+        throw FieldIsNotSupportedForCreateInputAutomapperException(
+          fieldName = inputCreateFieldInfo.inputFieldGetter.name,
+          className = inputClassName
+        )
       }
     }
 
