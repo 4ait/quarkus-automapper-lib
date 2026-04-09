@@ -6,5 +6,5 @@ import ru.code4a.quarkus.automapper.utils.reflection.bean.KotlinBeanField
 class InputCreateFieldInfo(
   val constructParameterName: String,
   val inputFieldGetter: KotlinBeanField,
-  val converter: AutoMapConverterChainBuilder.AutoMapDynConverter
+  val converter: AutoMapConverterChainBuilder.AutoMapDynConverter,
 )

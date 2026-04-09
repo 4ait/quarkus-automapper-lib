@@ -2,6 +2,8 @@ package ru.code4a.quarkus.automapper.utils.reflection.bean
 
 import kotlin.reflect.KClass
 import kotlin.reflect.KFunction
+import kotlin.reflect.KMutableProperty
+import kotlin.reflect.KVisibility
 import kotlin.reflect.full.memberFunctions
 import kotlin.reflect.full.memberProperties
 
@@ -11,15 +13,46 @@ class KotlinBeanField private constructor(
 ) {
 
   companion object {
-    private fun getBeanFieldsWithPrefix(
+    private fun validateDuplicateBeanFields(
+      beanKClass: KClass<*>,
+      beanFields: List<KotlinBeanField>,
+    ) {
+      if (beanFields.groupBy { field -> field.name }.any { entry -> entry.value.size > 1 }) {
+        error(
+          "Detected duplicated fields in bean $beanKClass:\n---\n" +
+            beanFields.groupBy { field -> field.name }
+              .flatMap { entry -> entry.value.map { field -> field.name } }.joinToString("\n") +
+            "---\n"
+        )
+      }
+    }
+
+    private fun getBeanMethodFieldsWithPrefix(
       beanKClass: KClass<*>,
       prefix: String,
       requiredParameterSize: Int
     ): List<KotlinBeanField> {
-      val propertiesFunctions =
+      return beanKClass.memberFunctions
+        .filter { function ->
+          function.visibility == KVisibility.PUBLIC &&
+            function.name.length > 3 &&
+            function.name.startsWith(prefix) &&
+            function.name[3].isUpperCase() &&
+            function.parameters.size == requiredParameterSize
+        }
+        .map { function ->
+          KotlinBeanField(
+            name = function.name.removePrefix(prefix).replaceFirstChar { it.lowercase() },
+            function = function
+          )
+        }
+    }
+
+    fun getBeanGettersFields(beanKClass: KClass<*>): List<KotlinBeanField> {
+      val propertyFields =
         beanKClass
           .memberProperties
-          .filter { property -> property.visibility == kotlin.reflect.KVisibility.PUBLIC }
+          .filter { property -> property.visibility == KVisibility.PUBLIC }
           .map { property ->
             KotlinBeanField(
               property.name,
@@ -27,42 +60,37 @@ class KotlinBeanField private constructor(
             )
           }
 
-      val functions =
-        beanKClass.memberFunctions
-          .filter { function ->
-            function.visibility == kotlin.reflect.KVisibility.PUBLIC &&
-                    function.name.length > 3 &&
-                    function.name.startsWith(prefix) &&
-                    function.name[3].isUpperCase() &&
-                    function.parameters.size == requiredParameterSize
-          }
-          .map { function ->
-            KotlinBeanField(
-              name = function.name.removePrefix(prefix).replaceFirstChar { it.lowercase() },
-              function = function
-            )
-          }
+      val functionFields =
+        getBeanMethodFieldsWithPrefix(beanKClass, "get", requiredParameterSize = 1)
 
-      val beanFields = propertiesFunctions + functions
-
-      if (beanFields.groupBy { field -> field.name }.any { entry -> entry.value.size > 1 }) {
-        error(
-          "Detected duplicated fields in bean $beanKClass:\n---\n" +
-                  beanFields.groupBy { field -> field.name }
-                    .flatMap { entry -> entry.value.map { field -> field.name } }.joinToString("\n") +
-                  "---\n"
-        )
-      }
-
-      return propertiesFunctions + functions
-    }
-
-    fun getBeanGettersFields(beanKClass: KClass<*>): List<KotlinBeanField> {
-      return getBeanFieldsWithPrefix(beanKClass, "get", requiredParameterSize = 1)
+      return (propertyFields + functionFields)
+        .also { fields ->
+          validateDuplicateBeanFields(beanKClass, fields)
+        }
     }
 
     fun getBeanSettersFields(beanKClass: KClass<*>): List<KotlinBeanField> {
-      return getBeanFieldsWithPrefix(beanKClass, "set", requiredParameterSize = 2)
+      val propertyFields =
+        beanKClass
+          .memberProperties
+          .filter { property ->
+            property.visibility == KVisibility.PUBLIC && property is KMutableProperty<*>
+          }
+          .map { property ->
+            val mutableProperty = property as KMutableProperty<*>
+            KotlinBeanField(
+              property.name,
+              function = mutableProperty.setter
+            )
+          }
+
+      val functionFields =
+        getBeanMethodFieldsWithPrefix(beanKClass, "set", requiredParameterSize = 2)
+
+      return (propertyFields + functionFields)
+        .also { fields ->
+          validateDuplicateBeanFields(beanKClass, fields)
+        }
     }
   }
 }

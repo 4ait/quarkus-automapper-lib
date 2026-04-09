@@ -7,9 +7,11 @@ import ru.code4a.quarkus.automapper.exceptions.CannotUpdateEntityInEmptyFieldInp
 import ru.code4a.quarkus.automapper.exceptions.FieldCannotBeNullInputAutomapperException
 import ru.code4a.quarkus.automapper.exceptions.FieldCannotBeUpdatedInputAutomapperException
 import ru.code4a.quarkus.automapper.interfaces.AutoMapFieldNamingStrategy
+import ru.code4a.quarkus.automapper.interfaces.AutoMapFieldUpdateValidator
 import ru.code4a.quarkus.automapper.interfaces.AutoMapTypeConverter
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpec
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpecTo
+import ru.code4a.quarkus.automapper.meta.AutoMapFieldUpdateValidatorInfo
 import ru.code4a.quarkus.automapper.meta.InputClassInfo
 import ru.code4a.quarkus.automapper.meta.InputCreateFieldInfo
 import ru.code4a.quarkus.automapper.meta.InputCreateInfo
@@ -23,6 +25,7 @@ import ru.code4a.quarkus.automapper.utils.reflection.getReadableName
 import ru.code4a.quarkus.automapper.utils.reflection.bean.KotlinBeanField
 import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanGettersFields
 import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanSettersFields
+import ru.code4a.quarkus.automapper.validators.NotSpecifiedAutoMapFieldUpdateValidator
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
 import kotlin.reflect.full.*
@@ -32,6 +35,19 @@ class AutoMapMapperBuilder {
   private class MappingDirection(
     val inputKClass: KClass<*>,
     val objectKClass: KClass<*>,
+  )
+
+  private class ResolvedFieldNames(
+    val setterName: String,
+    val getterName: String,
+    val constructParameterName: String,
+  )
+
+  private class FieldUpdateValidatorGenericTypes(
+    val parentType: KType,
+    val currentType: KType,
+    val newType: KType,
+    val inputType: KType,
   )
 
   private fun buildObjectByInputUpdater(
@@ -73,40 +89,16 @@ class AutoMapMapperBuilder {
 
           // TODO: inputGetterField.function.validateCallAccess()
 
-          val resolvedFieldNameLazy =
-            lazy {
-              autoMapFieldAnnotation
-                ?.getNamingStrategyInstance()
-                ?.getObjectFieldName(inputGetterField.name)
-                ?: inputGetterField.name
-            }
-
-          val setterName =
-            when {
-              autoMapFieldAnnotation != null && autoMapFieldAnnotation.setterFieldName.isNotEmpty() ->
-                autoMapFieldAnnotation.setterFieldName
-
-              autoMapFieldAnnotation != null && autoMapFieldAnnotation.fieldName.isNotEmpty() ->
-                autoMapFieldAnnotation.fieldName
-
-              else -> resolvedFieldNameLazy.value
-            }
-
-          val getterName =
-            when {
-              autoMapFieldAnnotation != null && autoMapFieldAnnotation.getterFieldName.isNotEmpty() ->
-                autoMapFieldAnnotation.getterFieldName
-
-              autoMapFieldAnnotation != null && autoMapFieldAnnotation.fieldName.isNotEmpty() ->
-                autoMapFieldAnnotation.fieldName
-
-              else -> resolvedFieldNameLazy.value
-            }
+          val resolvedFieldNames =
+            resolveFieldNames(
+              autoMapFieldAnnotation = autoMapFieldAnnotation,
+              inputFieldName = inputGetterField.name
+            )
 
           val objectGetter =
             objectFieldGetters
               .find {
-                it.name == getterName
+                it.name == resolvedFieldNames.getterName
               }
               ?: throw FieldCannotBeUpdatedInputAutomapperException(
                 fieldName = inputGetterField.name,
@@ -118,7 +110,7 @@ class AutoMapMapperBuilder {
           val objectSetter =
             objectFieldSetters
               .find {
-                it.name == setterName
+                it.name == resolvedFieldNames.setterName
               }
 
           // TODO: objectSetter?.function?.validateCallAccess()
@@ -137,11 +129,19 @@ class AutoMapMapperBuilder {
                   .findAnnotations(AutoMapObjectFromInput::class)
                   .isNotEmpty()
               ) {
-                "Missing required setter method '$setterName' for class '$objectKClass'. \n" +
+                "Missing required setter method '${resolvedFieldNames.setterName}' for class '$objectKClass'. \n" +
                   "The field from input class '$inputAutomapKClass' cannot be updated because: \n" +
                   "1) It has no setter method and  \n" +
                   "2) It is not marked as a nested entity (AutoMapEntityFromInput).  \n" +
                   "Either add a setter method or mark the field as a nested entity if nested updates are intended."
+              }
+
+              require(isFieldUpdateValidatorSpecified(autoMapFieldAnnotation).not()) {
+                "Field update validator ${autoMapFieldAnnotation?.updateValidatorClass} cannot be used for " +
+                  "field '${inputGetterField.name}' in mapper $mapperKClass because target field " +
+                  "'${resolvedFieldNames.getterName}' is updated in-place without a setter. " +
+                  "Update validators require a stable current/new value boundary. " +
+                  "Add a setter or remove the update validator."
               }
 
               val mapperGetter =
@@ -188,6 +188,16 @@ class AutoMapMapperBuilder {
               val entitySetterParameter = objectSetter.function.valueParameters[0]
               val setterRequiredParameterType = entitySetterParameter.type
               val setterRequiredParameterCanBeNullable = setterRequiredParameterType.isMarkedNullable
+              val fieldUpdateValidatorInfo =
+                getFieldUpdateValidatorInfo(
+                  autoMapFieldAnnotation = autoMapFieldAnnotation,
+                  fieldName = inputGetterField.name,
+                  mapperKClass = mapperKClass,
+                  parentKClass = objectKClass,
+                  currentType = objectGetter.function.returnType,
+                  newType = setterRequiredParameterType,
+                  inputType = inputGetterField.function.returnType,
+                )
 
               val valueConverter =
                 getValueConverterForField(
@@ -209,6 +219,9 @@ class AutoMapMapperBuilder {
                   )
                 }
 
+                val currentValue =
+                  objectGetter.function.call(obj)
+
                 val entityValue =
                   valueConverter.convert(
                     autoMapper = autoMapper,
@@ -216,6 +229,13 @@ class AutoMapMapperBuilder {
                     allowedUpdateObjectClasses = allowedUpdateObjectClasses,
                     input = inputValue
                   )
+
+                fieldUpdateValidatorInfo?.validate(
+                  parent = obj,
+                  currentValue = currentValue,
+                  newValue = entityValue,
+                  inputValue = inputValue,
+                )
 
                 objectSetter.function.call(obj, entityValue)
               }
@@ -251,6 +271,51 @@ class AutoMapMapperBuilder {
     }
   }
 
+  private fun resolveFieldNames(
+    autoMapFieldAnnotation: AutoMapField?,
+    inputFieldName: String,
+  ): ResolvedFieldNames {
+    val resolvedFieldName =
+      autoMapFieldAnnotation
+        ?.let { annotation ->
+          when {
+            annotation.fieldName.isNotEmpty() -> annotation.fieldName
+            else -> annotation.getNamingStrategyInstance().getObjectFieldName(inputFieldName)
+          }
+        }
+        ?: inputFieldName
+
+    val setterName =
+      when {
+        autoMapFieldAnnotation?.setterFieldName?.isNotEmpty() == true ->
+          autoMapFieldAnnotation.setterFieldName
+
+        else -> resolvedFieldName
+      }
+
+    val getterName =
+      when {
+        autoMapFieldAnnotation?.getterFieldName?.isNotEmpty() == true ->
+          autoMapFieldAnnotation.getterFieldName
+
+        else -> resolvedFieldName
+      }
+
+    val constructParameterName =
+      when {
+        autoMapFieldAnnotation?.constructParameterName?.isNotEmpty() == true ->
+          autoMapFieldAnnotation.constructParameterName
+
+        else -> resolvedFieldName
+      }
+
+    return ResolvedFieldNames(
+      setterName = setterName,
+      getterName = getterName,
+      constructParameterName = constructParameterName,
+    )
+  }
+
   private fun AutoMapField.getNamingStrategyInstance(): AutoMapFieldNamingStrategy {
     val objInstance = namingStrategy.objectInstance
 
@@ -259,6 +324,128 @@ class AutoMapMapperBuilder {
     }
 
     return objInstance
+  }
+
+  private fun isFieldUpdateValidatorSpecified(autoMapFieldAnnotation: AutoMapField?): Boolean {
+    return autoMapFieldAnnotation != null &&
+      autoMapFieldAnnotation.updateValidatorClass != NotSpecifiedAutoMapFieldUpdateValidator::class
+  }
+
+  private fun getFieldUpdateValidatorGenericTypes(
+    updateValidatorClass: KClass<out AutoMapFieldUpdateValidator<*, *, *, *>>
+  ): FieldUpdateValidatorGenericTypes {
+    val updateValidatorSuperType =
+      updateValidatorClass
+        .allSupertypes
+        .find { type ->
+          (type.classifier as? KClass<*>) == AutoMapFieldUpdateValidator::class
+        }
+        .unwrapElseError {
+          "Update validator $updateValidatorClass must implement ${AutoMapFieldUpdateValidator::class}"
+        }
+
+    fun getArgument(index: Int, name: String): KType {
+      return updateValidatorSuperType
+        .arguments
+        .getOrNull(index)
+        ?.type
+        .unwrapElseError {
+          "Update validator $updateValidatorClass must declare a concrete $name generic type"
+        }
+    }
+
+    return FieldUpdateValidatorGenericTypes(
+      parentType = getArgument(0, "parent"),
+      currentType = getArgument(1, "current"),
+      newType = getArgument(2, "new"),
+      inputType = getArgument(3, "input"),
+    )
+  }
+
+  private fun KType.normalizeForValidatorCompatibility(): KType {
+    return withNullability(false)
+  }
+
+  private fun requireFieldUpdateValidatorTypeCompatibility(
+    updateValidatorClass: KClass<out AutoMapFieldUpdateValidator<*, *, *, *>>,
+    mapperKClass: KClass<*>,
+    fieldName: String,
+    role: String,
+    updateValidatorType: KType,
+    actualType: KType,
+  ) {
+    val normalizedUpdateValidatorType = updateValidatorType.normalizeForValidatorCompatibility()
+    val normalizedActualType = actualType.normalizeForValidatorCompatibility()
+
+    require(normalizedUpdateValidatorType.isSupertypeOf(normalizedActualType)) {
+      "Update validator $updateValidatorClass is not compatible with field '$fieldName' in mapper $mapperKClass: " +
+        "$role type $updateValidatorType is not compatible with actual type $actualType"
+    }
+  }
+
+  private fun getFieldUpdateValidatorInfo(
+    autoMapFieldAnnotation: AutoMapField?,
+    fieldName: String,
+    mapperKClass: KClass<*>,
+    parentKClass: KClass<*>,
+    currentType: KType,
+    newType: KType,
+    inputType: KType,
+  ): AutoMapFieldUpdateValidatorInfo? {
+    if (isFieldUpdateValidatorSpecified(autoMapFieldAnnotation).not()) {
+      return null
+    }
+
+    val updateValidatorClass =
+      autoMapFieldAnnotation
+        ?.updateValidatorClass
+        .unwrapElseError {
+          "Update validator must be present for field '$fieldName' in mapper $mapperKClass"
+        }
+
+    val genericTypes =
+      getFieldUpdateValidatorGenericTypes(updateValidatorClass)
+
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass = updateValidatorClass,
+      mapperKClass = mapperKClass,
+      fieldName = fieldName,
+      role = "parent",
+      updateValidatorType = genericTypes.parentType,
+      actualType = parentKClass.starProjectedType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass = updateValidatorClass,
+      mapperKClass = mapperKClass,
+      fieldName = fieldName,
+      role = "currentValue",
+      updateValidatorType = genericTypes.currentType,
+      actualType = currentType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass = updateValidatorClass,
+      mapperKClass = mapperKClass,
+      fieldName = fieldName,
+      role = "newValue",
+      updateValidatorType = genericTypes.newType,
+      actualType = newType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass = updateValidatorClass,
+      mapperKClass = mapperKClass,
+      fieldName = fieldName,
+      role = "inputValue",
+      updateValidatorType = genericTypes.inputType,
+      actualType = inputType,
+    )
+
+    return AutoMapFieldUpdateValidatorInfo(
+      fieldName = fieldName,
+      validator =
+        updateValidatorClass.objectInstance.unwrapElseError {
+          "Update validator $updateValidatorClass should be object instance of AutoMapFieldUpdateValidator"
+        } as AutoMapFieldUpdateValidator<Any, Any, Any, Any>,
+    )
   }
 
   private fun getValueConverterForField(
@@ -470,33 +657,22 @@ class AutoMapMapperBuilder {
                       .findAnnotations(AutoMapField::class)
                       .firstOrNull()
 
-                  val constructParameterName =
-                    when {
-                      annotation?.constructParameterName?.isNotEmpty() == true ->
-                        annotation.constructParameterName
-
-                      annotation != null && annotation.fieldName.isNotEmpty() ->
-                        annotation.fieldName
-
-                      annotation != null ->
-                        annotation
-                          .getNamingStrategyInstance()
-                          .getObjectFieldName(inputGetterField.name)
-
-                      else -> inputGetterField.name
-                    }
+                  val resolvedFieldNames =
+                    resolveFieldNames(
+                      autoMapFieldAnnotation = annotation,
+                      inputFieldName = inputGetterField.name
+                    )
 
                   val constructParameter =
                     constructMethod
                       .valueParameters
-                      .find { it.name == constructParameterName }
+                      .find { it.name == resolvedFieldNames.constructParameterName }
                       .unwrapElseError {
-                        "Cannot find parameter \"$constructParameterName\" in constructor of " +
+                        "Cannot find parameter \"${resolvedFieldNames.constructParameterName}\" in constructor of " +
                           "$objectKClass (mapper $mapperAutomapKClass, input ${mappingDirection.inputKClass})"
                       }
-
                   InputCreateFieldInfo(
-                    constructParameterName = constructParameterName,
+                    constructParameterName = resolvedFieldNames.constructParameterName,
                     inputFieldGetter = inputGetterField,
                     converter =
                       getValueConverterForField(

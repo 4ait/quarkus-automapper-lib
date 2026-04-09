@@ -12,6 +12,7 @@ object conversions in GraphQL APIs, REST services, and other mapping scenarios.
 - **Declarative Mapping**: Define input-to-entity mappings with annotations
 - **Bidirectional Support**: Map from inputs to entities and back
 - **Type Conversion**: Automatic type conversion with customizable converters
+- **Field Validation Hooks**: Typed field-level validators invoked automatically during mapping
 - **Field Name Strategies**: Flexible field naming conventions
 - **GraphQL Integration**: Seamless integration with Quarkus' GraphQL implementation
 - **CDI Support**: Fully compatible with Quarkus dependency injection
@@ -137,9 +138,55 @@ This annotation provides fine-grained control over field mapping.
   getterFieldName = "entityGetterName",          // Getter method name in the entity
   namingStrategy = CustomNamingStrategy::class,  // Custom naming strategy
   typeConverter = CustomTypeConverter::class,    // Custom type converter
+  updateValidatorClass = CustomFieldUpdateValidator::class, // Field-level update validator
   mapper = CustomMapper::class                   // Custom mapper for nested objects
 )
 ```
+
+### Field Update Validators
+
+Use `updateValidatorClass` to validate a mapped field during `UPDATE`, after conversion/create/update of the field
+value but before assignment to the parent object.
+
+```kotlin
+object SubjectPhonesOwnershipValidator :
+  AutoMapFieldUpdateValidator<
+    SubjectDomainEntity,
+    Set<SubjectPhoneDomainEntity>,
+    Set<SubjectPhoneDomainEntity>,
+    List<SubjectPhoneInput>
+  > {
+
+  override fun validate(
+    parent: SubjectDomainEntity,
+    currentValue: Set<SubjectPhoneDomainEntity>?,
+    newValue: Set<SubjectPhoneDomainEntity>?,
+    inputValue: List<SubjectPhoneInput>?,
+    fieldName: String,
+  ) {
+    val newPhones = newValue.orEmpty()
+
+    require(newPhones.all { it.subjectId == parent.id }) {
+      "Phone list contains a phone from another subject"
+    }
+  }
+}
+
+class UpdateSubjectInput(
+  @get:AutoMapField(
+    fieldName = "phones",
+    updateValidatorClass = SubjectPhonesOwnershipValidator::class
+  )
+  var phones: List<SubjectPhoneInput>
+) : AutoMapperSpecTo<SubjectDomainEntity>
+```
+
+Notes:
+- Update validator generics are validated during mapper initialization. Incompatible `parent/current/new/input` types
+  fail fast on application startup with a readable error.
+- Update validators are invoked only for `UPDATE`.
+- Update validators are not supported for in-place nested updates on fields without a setter. Such configuration fails
+  fast on startup because the mapper cannot provide a stable `currentValue/newValue` boundary there.
 
 ### Mapping Interfaces
 
