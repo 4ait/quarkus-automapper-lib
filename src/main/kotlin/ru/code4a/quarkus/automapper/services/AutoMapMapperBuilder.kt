@@ -444,7 +444,7 @@ class AutoMapMapperBuilder {
       validator =
         updateValidatorClass.objectInstance.unwrapElseError {
           "Update validator $updateValidatorClass should be object instance of AutoMapFieldUpdateValidator"
-        } as AutoMapFieldUpdateValidator<Any, Any, Any, Any>,
+        } as AutoMapFieldUpdateValidator<Any, Any?, Any?, Any?>,
     )
   }
 

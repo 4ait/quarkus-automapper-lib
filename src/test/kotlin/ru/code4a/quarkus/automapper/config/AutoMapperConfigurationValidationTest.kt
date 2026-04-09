@@ -349,27 +349,27 @@ class OtherEntity(
 
 object InvalidParentValidator :
   AutoMapFieldUpdateValidator<OtherEntity, String, String, String> {
-  override fun validate(parent: OtherEntity, currentValue: String?, newValue: String?, inputValue: String?, fieldName: String) = Unit
+  override fun validate(parent: OtherEntity, currentValue: String, newValue: String, inputValue: String, fieldName: String) = Unit
 }
 
 object InvalidCurrentValidator :
   AutoMapFieldUpdateValidator<ConfigValidEntity, Int, String, String> {
-  override fun validate(parent: ConfigValidEntity, currentValue: Int?, newValue: String?, inputValue: String?, fieldName: String) = Unit
+  override fun validate(parent: ConfigValidEntity, currentValue: Int, newValue: String, inputValue: String, fieldName: String) = Unit
 }
 
 object InvalidNewValidator :
   AutoMapFieldUpdateValidator<ConfigValidEntity, String, Int, String> {
-  override fun validate(parent: ConfigValidEntity, currentValue: String?, newValue: Int?, inputValue: String?, fieldName: String) = Unit
+  override fun validate(parent: ConfigValidEntity, currentValue: String, newValue: Int, inputValue: String, fieldName: String) = Unit
 }
 
 object InvalidInputValidator :
   AutoMapFieldUpdateValidator<ConfigValidEntity, String, String, Int> {
-  override fun validate(parent: ConfigValidEntity, currentValue: String?, newValue: String?, inputValue: Int?, fieldName: String) = Unit
+  override fun validate(parent: ConfigValidEntity, currentValue: String, newValue: String, inputValue: Int, fieldName: String) = Unit
 }
 
 class ClassUpdateValidator :
   AutoMapFieldUpdateValidator<ConfigValidEntity, String, String, String> {
-  override fun validate(parent: ConfigValidEntity, currentValue: String?, newValue: String?, inputValue: String?, fieldName: String) = Unit
+  override fun validate(parent: ConfigValidEntity, currentValue: String, newValue: String, inputValue: String, fieldName: String) = Unit
 }
 
 @AutoMapObjectFromInput(

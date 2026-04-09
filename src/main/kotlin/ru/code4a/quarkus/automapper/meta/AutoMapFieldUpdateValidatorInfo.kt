@@ -4,7 +4,7 @@ import ru.code4a.quarkus.automapper.interfaces.AutoMapFieldUpdateValidator
 
 class AutoMapFieldUpdateValidatorInfo(
   val fieldName: String,
-  private val validator: AutoMapFieldUpdateValidator<Any, Any, Any, Any>,
+  private val validator: AutoMapFieldUpdateValidator<Any, Any?, Any?, Any?>,
 ) {
   fun validate(
     parent: Any,

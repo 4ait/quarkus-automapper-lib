@@ -331,9 +331,9 @@ object RecordingChildrenValidator :
 
   override fun validate(
     parent: TestParentEntity,
-    currentValue: Set<TestChildEntity>?,
-    newValue: Set<TestChildEntity>?,
-    inputValue: List<TestChildInput>?,
+    currentValue: Set<TestChildEntity>,
+    newValue: Set<TestChildEntity>,
+    inputValue: List<TestChildInput>,
     fieldName: String,
   ) {
     contexts += RecordedUpdateValidation(
@@ -351,9 +351,9 @@ object ThrowingChildrenValidator :
 
   override fun validate(
     parent: TestParentEntity,
-    currentValue: Set<TestChildEntity>?,
-    newValue: Set<TestChildEntity>?,
-    inputValue: List<TestChildInput>?,
+    currentValue: Set<TestChildEntity>,
+    newValue: Set<TestChildEntity>,
+    inputValue: List<TestChildInput>,
     fieldName: String,
   ) {
     throw TestFieldValidationException("validator rejected field")
@@ -365,9 +365,9 @@ object InvalidChildrenValidator :
 
   override fun validate(
     parent: TestParentEntity,
-    currentValue: String?,
-    newValue: Set<TestChildEntity>?,
-    inputValue: List<TestChildInput>?,
+    currentValue: String,
+    newValue: Set<TestChildEntity>,
+    inputValue: List<TestChildInput>,
     fieldName: String,
   ) {
     error("should not be called")

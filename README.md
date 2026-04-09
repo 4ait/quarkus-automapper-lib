@@ -159,9 +159,9 @@ object SubjectPhonesOwnershipValidator :
 
   override fun validate(
     parent: SubjectDomainEntity,
-    currentValue: Set<SubjectPhoneDomainEntity>?,
-    newValue: Set<SubjectPhoneDomainEntity>?,
-    inputValue: List<SubjectPhoneInput>?,
+    currentValue: Set<SubjectPhoneDomainEntity>,
+    newValue: Set<SubjectPhoneDomainEntity>,
+    inputValue: List<SubjectPhoneInput>,
     fieldName: String,
   ) {
     val newPhones = newValue.orEmpty()
