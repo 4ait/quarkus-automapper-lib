@@ -127,6 +127,20 @@ class AutoMapperRuntimeScenariosTest {
   }
 
   @Test
+  fun `should create entity with inherited type converter`() {
+    val autoMapper = buildAutoMapper(RuntimeInheritedConvertedCreateInput::class)
+
+    val created =
+      autoMapper.createOrUpdateObjectByInput(
+        mapperSpec = RuntimeInheritedConvertedCreateInput::class,
+        allowedCreationObjectClasses = setOf(RuntimePersonEntity::class),
+        input = RuntimeInheritedConvertedCreateInput(name = "Golf+", ageText = "45"),
+      )
+
+    assertEquals(45, created.age)
+  }
+
+  @Test
   fun `should create entity with nested object`() {
     val autoMapper = buildAutoMapper(RuntimeNestedCreateInput::class, RuntimeAddressInput::class)
 
@@ -377,6 +391,29 @@ class AutoMapperRuntimeScenariosTest {
     assertSame(address, entity.address)
     assertEquals("New", entity.address?.city)
     assertEquals("Line", entity.address?.street)
+  }
+
+  @Test
+  fun `should update entity with nested object by inherited getter`() {
+    val autoMapper = buildAutoMapper(RuntimeInheritedAddressUpdateInput::class, RuntimeInheritedAddressInput::class)
+    val address = RuntimeAddressEntity.create(city = "North", street = "Road")
+    val entity = RuntimePersonEntity.create(name = "Victor+", address = null)
+
+    autoMapper.updateObjectByInput(
+      mapperSpec = RuntimeInheritedAddressUpdateInput::class,
+      allowedUpdateObjectClasses = setOf(RuntimePersonEntity::class, RuntimeAddressEntity::class),
+      input =
+        RuntimeInheritedAddressUpdateInput(
+          id = entity.id,
+          address = RuntimeInheritedAddressInput(id = address.id, city = "South", street = "Lane"),
+        ),
+      obj = entity,
+    )
+
+    assertSame(address, entity.address)
+    assertEquals("South", entity.address?.city)
+    assertEquals("Lane", entity.address?.street)
+    assertEquals(listOf(address.id), RuntimeMappingState.requestedAddressIds)
   }
 
   @Test
@@ -761,12 +798,27 @@ object RuntimeAddressGetter {
   }
 }
 
+open class RuntimeBaseAddressGetter {
+  fun get(entityClass: KClass<*>, id: String): Any? {
+    RuntimeMappingState.requestedAddressIds += id
+    return RuntimeMappingState.addresses[id]
+  }
+}
+
+object RuntimeInheritedAddressGetter : RuntimeBaseAddressGetter()
+
 object RuntimeChildGetter {
   fun get(entityClass: KClass<*>, id: String): Any? {
     RuntimeMappingState.requestedChildIds += id
     return RuntimeMappingState.children[id]
   }
 }
+
+open class BaseStringToIntTestConverter : AutoMapTypeConverter<String, Int> {
+  override fun convert(value: String): Int = value.toInt()
+}
+
+class InheritedStringToIntTestConverter : BaseStringToIntTestConverter()
 
 class StringToIntTestConverter : AutoMapTypeConverter<String, Int> {
   override fun convert(value: String): Int = value.toInt()
@@ -805,6 +857,13 @@ class RuntimeNamingStrategyCreateInput(
 class RuntimeConvertedCreateInput(
   var name: String,
   @get:AutoMapField(constructParameterName = "age", typeConverter = StringToIntTestConverter::class)
+  var ageText: String,
+) : AutoMapperSpecTo<RuntimePersonEntity>
+
+@AutoMapObjectFromInput(constructMethod = "create")
+class RuntimeInheritedConvertedCreateInput(
+  var name: String,
+  @get:AutoMapField(constructParameterName = "age", typeConverter = InheritedStringToIntTestConverter::class)
   var ageText: String,
 ) : AutoMapperSpecTo<RuntimePersonEntity>
 
@@ -862,6 +921,19 @@ class RuntimeNullNameCreateInput(
   allowCreate = true,
 )
 class RuntimeAddressInput(
+  var id: String?,
+  var city: String,
+  var street: String,
+) : AutoMapperSpecTo<RuntimeAddressEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = RuntimeInheritedAddressGetter::class,
+  allowUpdate = true,
+  allowCreate = true,
+)
+class RuntimeInheritedAddressInput(
   var id: String?,
   var city: String,
   var street: String,
@@ -942,6 +1014,18 @@ class RuntimeConvertedUpdateInput(
 class RuntimeAddressUpdateInput(
   var id: String?,
   var address: RuntimeAddressInput?,
+) : AutoMapperSpecTo<RuntimePersonEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = RuntimePersonGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class RuntimeInheritedAddressUpdateInput(
+  var id: String?,
+  var address: RuntimeInheritedAddressInput?,
 ) : AutoMapperSpecTo<RuntimePersonEntity>
 
 @AutoMapObjectFromInput(

@@ -457,42 +457,19 @@ class AutoMapMapperBuilder {
       autoMapFieldAnnotation != null &&
       autoMapFieldAnnotation.typeConverter != NotSpecifiedAutoMapTypeConverter::class
     ) {
-      val convertFunction =
-        autoMapFieldAnnotation
-          .typeConverter
-          .declaredFunctions
-          .find { function -> function.name == AutoMapTypeConverter<*, *>::convert.name }
-          .unwrapElseError {
-            "Function ${AutoMapTypeConverter<*, *>::convert.name} must be " +
-              "present for ${autoMapFieldAnnotation.typeConverter}"
-          }
+      val introspectedConverter =
+        AutoMapTypeConverterIntrospector.introspect(
+          autoMapFieldAnnotation.typeConverter
+        )
 
-      val convertFunctionFirstParameter =
-        convertFunction
-          .valueParameters
-          .firstOrNull()
-          .unwrapElseError {
-            "Function convert first parameter must be present for ${autoMapFieldAnnotation.typeConverter}"
-          }
+      AutoMapTypeConverterIntrospector.requireCompatibility(
+        typeConverterClass = autoMapFieldAnnotation.typeConverter,
+        fromType = fromType,
+        toType = toType,
+        introspectedConverter = introspectedConverter
+      )
 
-      require(
-        convertFunctionFirstParameter.type.isSupertypeOf(fromType)
-          || convertFunctionFirstParameter.type == fromType
-      ) {
-        "First argument of converter ${autoMapFieldAnnotation.typeConverter} " +
-          "(${convertFunctionFirstParameter.type}) is not compatible with $fromType"
-      }
-
-      require(
-        convertFunction.returnType.isSubtypeOf(toType)
-          || convertFunction.returnType == fromType
-      ) {
-        "Return type of converter ${autoMapFieldAnnotation.typeConverter} " +
-          "(${convertFunction.returnType}) is not compatible with $toType"
-      }
-
-      val specifiedTypeConverter =
-        autoMapFieldAnnotation.typeConverter.createInstance() as AutoMapTypeConverter<Any?, Any?>
+      val specifiedTypeConverter = introspectedConverter.instance
 
       AutoMapDynConverter { autoMapper: AutoMapper,
                             allowedCreationObjectClasses: Set<KClass<*>>,
@@ -707,50 +684,46 @@ class AutoMapMapperBuilder {
             null
           }
 
+        val idGetterField =
+          mapperAutomapKClass
+            .getBeanGettersFields()
+            .find {
+              it.name == autoMapObjectFromInputAnnotation.idField
+            }
+            ?.let { field ->
+              inputGettersFields
+                .find {
+                  it.name == field.name
+                }
+                .unwrapElseError {
+                  "Cannot find field ${field.name} in ${mappingDirection.inputKClass}"
+                }
+            }
+
         val objectByIdGetter =
           autoMapObjectFromInputAnnotation.let { autoMapEntityFromInputAnnotation ->
             if (autoMapEntityFromInputAnnotation.objectGetterClass == Object::class) {
               null
             } else {
-              require(
-                autoMapEntityFromInputAnnotation
-                  .objectGetterClass
-                  .declaredFunctions
-                  .size == 1
-              ) {
-                "Entity getter class ${autoMapEntityFromInputAnnotation.objectGetterClass} must " +
-                  "have only one declared function"
+              val introspectedGetter =
+                AutoMapObjectGetterIntrospector.introspect(
+                  autoMapEntityFromInputAnnotation.objectGetterClass
+                )
+
+              idGetterField?.let { field ->
+                AutoMapObjectGetterIntrospector.requireCompatibility(
+                  objectGetterClass = autoMapEntityFromInputAnnotation.objectGetterClass,
+                  objectKClass = objectKClass,
+                  idType = field.function.returnType,
+                  introspectedGetter = introspectedGetter,
+                )
               }
 
-              val declaredFunction =
-                autoMapEntityFromInputAnnotation
-                  .objectGetterClass
-                  .declaredFunctions
-                  .firstOrNull()
-                  .unwrapElseError {
-                    "Entity getter class ${autoMapEntityFromInputAnnotation.objectGetterClass} must " +
-                      "have declared function"
-                  }
-
-              require(declaredFunction.parameters.size == 3) {
-                "Declared function $declaredFunction of " +
-                  "entity getter class ${autoMapEntityFromInputAnnotation.objectGetterClass} " +
-                  "must have 3 parameters"
-              }
-
-              val objectGetterInstance =
-                autoMapEntityFromInputAnnotation
-                  .objectGetterClass
-                  .objectInstance
-                  .unwrapElseError {
-                    "Object Instance must be present for class ${autoMapEntityFromInputAnnotation.objectGetterClass}"
-                  }
-
-              // TODO: declaredFunction.validateCallAccess()
+              // TODO: introspectedGetter.getterFunction.validateCallAccess()
 
               ObjectByIdGetter { id: Any ->
-                declaredFunction.call(
-                  objectGetterInstance,
+                introspectedGetter.getterFunction.call(
+                  introspectedGetter.instance,
                   objectKClass,
                   id
                 )
@@ -769,22 +742,6 @@ class AutoMapMapperBuilder {
           } else {
             null
           }
-
-        val idGetterField =
-          mapperAutomapKClass
-            .getBeanGettersFields()
-            .find {
-              it.name == autoMapObjectFromInputAnnotation.idField
-            }
-            ?.let { field ->
-              inputGettersFields
-                .find {
-                  it.name == field.name
-                }
-                .unwrapElseError {
-                  "Cannot find field ${field.name} in ${mappingDirection.inputKClass}"
-                }
-            }
 
         mapperAutomapClass to InputClassInfo(
           objectByInputUpdater = objectByInputUpdater,

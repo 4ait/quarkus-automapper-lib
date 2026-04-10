@@ -56,18 +56,43 @@ class AutoMapperConfigurationValidationTest {
   }
 
   @Test
-  fun `should fail when object getter class declares multiple functions`() {
-    assertBuildFailsWithMessage("must have only one declared function", MultipleFunctionsGetterInput::class)
+  fun `should build when object getter function is declared directly on object`() {
+    assertBuildSucceeds(DirectGetterInput::class)
   }
 
   @Test
-  fun `should fail when object getter class declares no functions`() {
-    assertBuildFailsWithMessage("must have only one declared function", NoFunctionsGetterInput::class)
+  fun `should build when object getter function is inherited from base class`() {
+    assertBuildSucceeds(InheritedGetterInput::class)
+  }
+
+  @Test
+  fun `should fail when object getter class declares multiple functions`() {
+    assertBuildFailsWithMessage("must have exactly one get(entityClass, id) function", MultipleFunctionsGetterInput::class)
+  }
+
+  @Test
+  fun `should fail when object getter class declares no getter function`() {
+    assertBuildFailsWithMessage("must have exactly one get(entityClass, id) function", NoFunctionsGetterInput::class)
   }
 
   @Test
   fun `should fail when object getter function has wrong arity`() {
-    assertBuildFailsWithMessage("must have 3 parameters", WrongArityGetterInput::class)
+    assertBuildFailsWithMessage("must have 2 parameters", WrongArityGetterInput::class)
+  }
+
+  @Test
+  fun `should fail when object getter entityClass type is incompatible`() {
+    assertBuildFailsWithMessage("First argument of getter", WrongEntityClassTypeGetterInput::class)
+  }
+
+  @Test
+  fun `should fail when object getter id type is incompatible`() {
+    assertBuildFailsWithMessage("Second argument of getter", WrongIdTypeGetterInput::class)
+  }
+
+  @Test
+  fun `should fail when object getter return type is incompatible`() {
+    assertBuildFailsWithMessage("Return type of getter", WrongReturnTypeGetterInput::class)
   }
 
   @Test
@@ -126,6 +151,10 @@ class AutoMapperConfigurationValidationTest {
       "Expected message to contain '$expectedMessagePart', actual='${exception.message}'"
     )
   }
+
+  private fun assertBuildSucceeds(vararg mapperSpecClasses: KClass<*>) {
+    AutoMapMapperBuilder().build(mapperSpecClasses.map { it.java })
+  }
 }
 
 class ConfigValidEntity(
@@ -147,6 +176,12 @@ class ConfigValidEntity(
 object ConfigGetter {
   fun get(entityClass: KClass<*>, id: String): Any? = null
 }
+
+open class ConfigBaseGetter {
+  fun get(entityClass: KClass<*>, id: String): Any? = null
+}
+
+object InheritedConfigGetter : ConfigBaseGetter()
 
 class MissingAutoMapAnnotationInput(
   var name: String,
@@ -222,6 +257,30 @@ class NoGetterEntity(
   allowUpdate = true,
   allowCreate = false,
 )
+class DirectGetterInput(
+  var id: String,
+  var name: String,
+) : AutoMapperSpecTo<ConfigValidEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = InheritedConfigGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class InheritedGetterInput(
+  var id: String,
+  var name: String,
+) : AutoMapperSpecTo<ConfigValidEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = ConfigGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
 class NoGetterUpdateInput(
   var id: String,
   var name: String,
@@ -250,7 +309,7 @@ class ReadOnlyNameUpdateInput(
 
 object MultipleFunctionsGetter {
   fun get(entityClass: KClass<*>, id: String): Any? = null
-  fun other(): Any? = null
+  fun get(entityClass: KClass<*>, id: Int): Any? = null
 }
 
 @AutoMapObjectFromInput(
@@ -291,6 +350,54 @@ object WrongArityGetter {
   allowCreate = false,
 )
 class WrongArityGetterInput(
+  var id: String,
+  var name: String,
+) : AutoMapperSpecTo<ConfigValidEntity>
+
+object WrongIdTypeGetter {
+  fun get(entityClass: KClass<*>, id: Int): Any? = null
+}
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = WrongIdTypeGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class WrongIdTypeGetterInput(
+  var id: String,
+  var name: String,
+) : AutoMapperSpecTo<ConfigValidEntity>
+
+object WrongEntityClassTypeGetter {
+  fun get(entityClass: String, id: String): Any? = null
+}
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = WrongEntityClassTypeGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class WrongEntityClassTypeGetterInput(
+  var id: String,
+  var name: String,
+) : AutoMapperSpecTo<ConfigValidEntity>
+
+object WrongReturnTypeGetter {
+  fun get(entityClass: KClass<*>, id: String): String? = null
+}
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = WrongReturnTypeGetter::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class WrongReturnTypeGetterInput(
   var id: String,
   var name: String,
 ) : AutoMapperSpecTo<ConfigValidEntity>
