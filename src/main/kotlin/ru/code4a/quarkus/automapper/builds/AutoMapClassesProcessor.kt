@@ -4,6 +4,7 @@ import io.quarkus.deployment.annotations.BuildProducer
 import io.quarkus.deployment.annotations.BuildStep
 import io.quarkus.deployment.builditem.CombinedIndexBuildItem
 import io.quarkus.deployment.builditem.GeneratedResourceBuildItem
+import io.quarkus.deployment.builditem.nativeimage.ReflectiveClassBuildItem
 import org.jboss.jandex.DotName
 import ru.code4a.quarkus.automapper.annotations.AutoMapObjectFromInput
 import ru.code4a.quarkus.automapper.annotations.AutoMapTypeConverterDefault
@@ -12,7 +13,8 @@ class AutoMapClassesProcessor {
   @BuildStep
   fun produceClassesGraphqlAutoMapFromInput(
     combinedIndex: CombinedIndexBuildItem,
-    resourceProducer: BuildProducer<GeneratedResourceBuildItem>
+    resourceProducer: BuildProducer<GeneratedResourceBuildItem>,
+    reflectiveClassProducer: BuildProducer<ReflectiveClassBuildItem>
   ) {
     val annotationsInstances =
       combinedIndex
@@ -34,6 +36,16 @@ class AutoMapClassesProcessor {
         classes.joinToString("\n").toByteArray()
       )
     )
+
+    classes.forEach { className ->
+      reflectiveClassProducer.produce(
+        ReflectiveClassBuildItem
+          .builder(className.toString())
+          .fields()
+          .methods()
+          .build()
+      )
+    }
   }
 
   @BuildStep
