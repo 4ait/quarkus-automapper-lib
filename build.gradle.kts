@@ -4,7 +4,7 @@ group = "ru.code4a"
 version = file("version").readText().trim()
 
 plugins {
-  val kotlinVersion = "2.3.10"
+  val kotlinVersion = "2.4.0"
 
   kotlin("jvm") version kotlinVersion
   kotlin("plugin.serialization") version kotlinVersion

@@ -12,6 +12,7 @@ import ru.code4a.quarkus.automapper.interfaces.AutoMapTypeConverter
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpec
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpecTo
 import ru.code4a.quarkus.automapper.meta.AutoMapFieldUpdateValidatorInfo
+import ru.code4a.quarkus.automapper.meta.BatchExistingEntityLocatorInfo
 import ru.code4a.quarkus.automapper.meta.InputClassInfo
 import ru.code4a.quarkus.automapper.meta.InputCreateFieldInfo
 import ru.code4a.quarkus.automapper.meta.InputCreateInfo
@@ -158,6 +159,7 @@ class AutoMapMapperBuilder {
               ObjectFieldByInputUpdater { autoMapper: AutoMapper,
                                           allowedCreationObjectClasses: Set<KClass<*>>,
                                           allowedUpdateObjectClasses: Set<KClass<*>>,
+                                          mappingContext: AutoMapMappingFrame,
                                           inputFieldGetter: KotlinBeanField,
                                           obj: Any,
                                           inputValue: Any? ->
@@ -181,7 +183,8 @@ class AutoMapMapperBuilder {
                     allowedCreationObjectClasses = allowedCreationObjectClasses,
                     allowedUpdateObjectClasses = allowedUpdateObjectClasses,
                     input = inputValue,
-                    obj = existingValue
+                    obj = existingValue,
+                    parentContext = mappingContext,
                   )
               }
             } else {
@@ -209,6 +212,7 @@ class AutoMapMapperBuilder {
               ObjectFieldByInputUpdater { autoMapper: AutoMapper,
                                           allowedCreationObjectClasses: Set<KClass<*>>,
                                           allowedUpdateObjectClasses: Set<KClass<*>>,
+                                          mappingContext: AutoMapMappingFrame,
                                           inputFieldGetter: KotlinBeanField,
                                           obj: Any,
                                           inputValue: Any? ->
@@ -227,6 +231,7 @@ class AutoMapMapperBuilder {
                     autoMapper = autoMapper,
                     allowedCreationObjectClasses = allowedCreationObjectClasses,
                     allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                    mappingContext = mappingContext,
                     input = inputValue
                   )
 
@@ -250,6 +255,7 @@ class AutoMapMapperBuilder {
     return ObjectByInputUpdater { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
+                                  mappingContext: AutoMapMappingFrame,
                                   obj: Any,
                                   input: Any ->
       objectFieldByInputUpdaters.forEach { fieldUpdater ->
@@ -262,6 +268,7 @@ class AutoMapMapperBuilder {
             autoMapper = autoMapper,
             allowedCreationObjectClasses = allowedCreationObjectClasses,
             allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+            mappingContext = mappingContext,
             inputFieldGetter = inputGetterField,
             obj = obj,
             inputValue = inputValue
@@ -474,6 +481,7 @@ class AutoMapMapperBuilder {
       AutoMapDynConverter { autoMapper: AutoMapper,
                             allowedCreationObjectClasses: Set<KClass<*>>,
                             allowedUpdateObjectClasses: Set<KClass<*>>,
+                            mappingContext: AutoMapMappingFrame,
                             input: Any? ->
         specifiedTypeConverter.convert(input)
       }
@@ -563,6 +571,54 @@ class AutoMapMapperBuilder {
         inputKClass = inputKClass,
         objectKClass = objectKClass
       )
+    }
+  }
+
+  private fun validateExistingEntityLocatorParentTypes(
+    inputClassesInfoByMapperSpecClass: Map<Class<*>, InputClassInfo>,
+  ) {
+    inputClassesInfoByMapperSpecClass.forEach { (parentMapperClass, parentInfo) ->
+      parentMapperClass.kotlin.getBeanGettersFields().forEach fieldLoop@{ mapperField ->
+        val fieldAnnotation = mapperField.function.findAnnotations(AutoMapField::class).firstOrNull()
+        val nestedMapperClass =
+          if (fieldAnnotation != null && fieldAnnotation.mapper != Object::class) {
+            fieldAnnotation.mapper
+          } else {
+            nestedMappedClass(mapperField.function.returnType)
+          }
+        val childInfo =
+          nestedMapperClass
+            ?.let { inputClassesInfoByMapperSpecClass[it.java] }
+            ?: return@fieldLoop
+
+        childInfo.existingEntityLocators.forEach { locator ->
+          require(
+            locator.parentSourceType
+              .withNullability(false)
+              == parentInfo.inputKClass.starProjectedType
+          ) {
+            "Existing entity lookup ${locator.locatorClass} parent source type " +
+              "${locator.parentSourceType} is not compatible with ${parentInfo.inputKClass}"
+          }
+          require(
+            locator.parentTargetType
+              .withNullability(false)
+              == parentInfo.objectKClass.starProjectedType
+          ) {
+            "Existing entity lookup ${locator.locatorClass} parent target type " +
+              "${locator.parentTargetType} is not compatible with ${parentInfo.objectKClass}"
+          }
+        }
+      }
+    }
+  }
+
+  private fun nestedMappedClass(type: KType): KClass<*>? {
+    val typeClass = type.classifier as? KClass<*> ?: return null
+    return if (typeClass.isSubclassOf(Collection::class)) {
+      type.arguments.firstOrNull()?.type?.let(::nestedMappedClass)
+    } else {
+      typeClass.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
     }
   }
 
@@ -743,16 +799,29 @@ class AutoMapMapperBuilder {
             null
           }
 
+        val existingEntityLocators =
+          autoMapObjectFromInputAnnotation.existingEntityLookupClasses.map { lookupClass ->
+            AutoMapExistingEntityLocatorIntrospector.introspect(
+              locatorClass = lookupClass,
+              inputKClass = mappingDirection.inputKClass,
+              targetKClass = objectKClass,
+            )
+          }
+
         mapperAutomapClass to InputClassInfo(
           objectByInputUpdater = objectByInputUpdater,
           autoMapObjectFromInputAnnotation = autoMapObjectFromInputAnnotation,
           idGetterField = idGetterField,
           inputCreateInfo = inputCreateInfo,
           objectByIdGetter = objectByIdGetter,
+          existingEntityLocators = existingEntityLocators,
+          batchExistingEntityLocators = existingEntityLocators.filterIsInstance<BatchExistingEntityLocatorInfo>(),
           objectKClass = objectKClass,
           inputKClass = mappingDirection.inputKClass,
         )
       }
+
+    validateExistingEntityLocatorParentTypes(inputClassesInfoByMapperSpecClass)
 
     return AutoMapper(
       inputClassesInfoByMapperSpecClass = inputClassesInfoByMapperSpecClass

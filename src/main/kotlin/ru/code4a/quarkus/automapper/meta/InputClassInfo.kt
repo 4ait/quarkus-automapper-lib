@@ -6,12 +6,14 @@ import ru.code4a.quarkus.automapper.meta.interfaces.ObjectByIdGetter
 import ru.code4a.quarkus.automapper.meta.interfaces.ObjectByInputUpdater
 import kotlin.reflect.KClass
 
-class InputClassInfo(
+internal class InputClassInfo(
   val inputKClass: KClass<*>,
   val objectKClass: KClass<*>,
   val objectByInputUpdater: ObjectByInputUpdater?,
   val autoMapObjectFromInputAnnotation: AutoMapObjectFromInput,
   val idGetterField: KotlinBeanField?,
   val inputCreateInfo: InputCreateInfo?,
-  val objectByIdGetter: ObjectByIdGetter?
+  val objectByIdGetter: ObjectByIdGetter?,
+  val existingEntityLocators: List<ExistingEntityLocatorInfo>,
+  val batchExistingEntityLocators: List<BatchExistingEntityLocatorInfo>,
 )

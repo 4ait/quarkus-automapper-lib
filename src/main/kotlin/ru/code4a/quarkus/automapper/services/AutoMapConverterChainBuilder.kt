@@ -8,13 +8,14 @@ import kotlin.reflect.KType
 import kotlin.reflect.full.findAnnotations
 import kotlin.reflect.full.isSubclassOf
 
-object AutoMapConverterChainBuilder {
+internal object AutoMapConverterChainBuilder {
 
   fun interface AutoMapDynConverter {
     fun convert(
       autoMapper: AutoMapper,
       allowedCreationObjectClasses: Set<KClass<*>>,
       allowedUpdateObjectClasses: Set<KClass<*>>,
+      mappingContext: AutoMapMappingFrame,
       input: Any?
     ): Any?
   }
@@ -59,21 +60,37 @@ object AutoMapConverterChainBuilder {
 
         val itemConverter = build(fromGenericArgument, toGenericArgument)
 
+        val itemMapperSpec =
+          (fromGenericArgument.classifier as? KClass<*>)
+            ?.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
+
         AutoMapDynConverter { autoMapper: AutoMapper,
                               allowedCreationObjectClasses: Set<KClass<*>>,
                               allowedUpdateObjectClasses: Set<KClass<*>>,
+                              mappingContext: AutoMapMappingFrame,
                               input: Any? ->
           if (canBeProcessed(input)) {
             if (input == null) {
               error("Input must be present")
             }
 
+            val inputCollection = input as Collection<Any?>
+
+            if (itemMapperSpec != null) {
+              autoMapper.prepareExistingEntityLookups(
+                mapperSpec = itemMapperSpec,
+                inputs = inputCollection.filterNotNull(),
+                parentContext = mappingContext,
+              )
+            }
+
             collectionToContainerConverter(
-              (input as Collection<Any?>).map {
+              inputCollection.map {
                 itemConverter.convert(
                   autoMapper = autoMapper,
                   allowedCreationObjectClasses = allowedCreationObjectClasses,
                   allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                  mappingContext = mappingContext,
                   input = it
                 )
               }
@@ -104,6 +121,7 @@ object AutoMapConverterChainBuilder {
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
+                                  mappingContext: AutoMapMappingFrame,
                                   input: Any? ->
               collectionToContainerConverter(
                 listOf(
@@ -111,6 +129,7 @@ object AutoMapConverterChainBuilder {
                     autoMapper = autoMapper,
                     allowedCreationObjectClasses = allowedCreationObjectClasses,
                     allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                    mappingContext = mappingContext,
                     input = input
                   )
                 )
@@ -122,6 +141,7 @@ object AutoMapConverterChainBuilder {
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
+                                  mappingContext: AutoMapMappingFrame,
                                   input: Any? ->
               if (canBeProcessed(input)) {
                 if (input == null) {
@@ -133,7 +153,8 @@ object AutoMapConverterChainBuilder {
                     input::class,
                     allowedCreationObjectClasses,
                     allowedUpdateObjectClasses,
-                    input
+                    input,
+                    parentContext = mappingContext,
                   )
               } else {
                 null
@@ -151,6 +172,7 @@ object AutoMapConverterChainBuilder {
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
+                                  mappingContext: AutoMapMappingFrame,
                                   input: Any? ->
               if (canBeProcessed(input)) {
                 defaultConverter.convert(
@@ -169,6 +191,7 @@ object AutoMapConverterChainBuilder {
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
+                                  mappingContext: AutoMapMappingFrame,
                                   input: Any? ->
               input
             }

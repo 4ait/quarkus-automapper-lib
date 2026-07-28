@@ -46,6 +46,27 @@ class AutoMapClassesProcessor {
           .build()
       )
     }
+
+    val existingEntityLookupClasses =
+      annotationsInstances
+        .flatMap { annotationInstance ->
+          annotationInstance
+            .value("existingEntityLookupClasses")
+            ?.asClassArray()
+            ?.toList()
+            .orEmpty()
+        }
+        .toSet()
+
+    existingEntityLookupClasses.forEach { className ->
+      reflectiveClassProducer.produce(
+        ReflectiveClassBuildItem
+          .builder(className.toString())
+          .fields()
+          .methods()
+          .build()
+      )
+    }
   }
 
   @BuildStep

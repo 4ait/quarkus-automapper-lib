@@ -304,6 +304,86 @@ Then reference it in your input class:
 class UpdateStreamInput(/*...*/)
 ```
 
+### Existing Entities by Natural or Composite Key
+
+An input does not have to contain the target entity ID. Add one or more typed lookup strategies to the mapper annotation.
+The generic arguments declare the input, target, lookup key, parent input, and parent target types. For example, a
+`ContractSubject` can be found by the parent contract and the input `subjectId`:
+
+```kotlin
+object ContractSubjectLookup :
+  AutoMapBatchExistingEntityLookup<
+    ContractSubjectInput,
+    ContractSubjectEntity,
+    UUID,
+    ContractInput,
+    ContractEntity
+    > {
+
+  override fun getLookupKey(
+    input: ContractSubjectInput,
+    context: AutoMapExistingEntityLookupContext<
+      ContractSubjectInput,
+      ContractSubjectEntity,
+      ContractInput,
+      ContractEntity
+      >,
+  ): UUID = input.subjectId
+
+  override fun loadExisting(
+    keys: Set<UUID>,
+    inputs: List<ContractSubjectInput>,
+    context: AutoMapBatchExistingEntityLookupContext<
+      ContractSubjectInput,
+      ContractSubjectEntity,
+      ContractInput,
+      ContractEntity
+      >,
+  ): Map<UUID, ContractSubjectEntity> {
+    val contract = requireNotNull(context.parentTarget)
+    val repository = context.getService(ContractSubjectRepository::class)
+
+    return repository
+      .findAllByContractAndSubjectIds(contract.id, keys)
+      .associateBy { it.subject.id }
+  }
+
+  override fun validateExisting(
+    target: ContractSubjectEntity,
+    input: ContractSubjectInput,
+    context: AutoMapExistingEntityLookupContext<
+      ContractSubjectInput,
+      ContractSubjectEntity,
+      ContractInput,
+      ContractEntity
+      >,
+  ) {
+    require(target.contract === context.parentTarget)
+  }
+}
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = AutoMapInputEntityGetterByNodeId::class,
+  allowUpdate = true,
+  existingEntityLookupClasses = [ContractSubjectLookup::class],
+)
+class ContractSubjectInput(/*...*/)
+```
+
+`AutoMapExistingEntityLookup` provides the corresponding one-item API. Both APIs use their lookup key as an
+operation-scoped cache key, including misses. A batch strategy is preloaded once for all uncached keys in a nested
+collection, so it does not cause an N+1 query pattern.
+
+The default order is ID first and then custom strategies. Set `existingEntityLookupOrder` to `CUSTOM_FIRST` to reverse
+it. The default conflict policy is deterministic first-match behavior; `FAIL_ON_CONFLICT` evaluates all strategies and
+rejects different target instances.
+
+Lookup classes must be Kotlin `object`s. Their generic contracts, key type, parent types, and object instances are
+resolved when `AutoMapMapperBuilder` creates static mapper metadata. Quarkus also registers lookup classes for native
+reflection. Runtime resolution invokes prepared adapters and does not perform reflective target-type inspection.
+
 ## Exception Handling
 
 AutoMapper provides specific exceptions for common errors:
