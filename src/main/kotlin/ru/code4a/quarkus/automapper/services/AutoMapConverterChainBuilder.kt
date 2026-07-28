@@ -20,7 +20,11 @@ internal object AutoMapConverterChainBuilder {
     ): Any?
   }
 
-  fun build(fromType: KType, toType: KType): AutoMapDynConverter {
+  fun build(
+    fromType: KType,
+    toType: KType,
+    mapperSpec: KClass<*>? = null,
+  ): AutoMapDynConverter {
     val fromKClass =
       fromType
         .classifier
@@ -58,11 +62,12 @@ internal object AutoMapConverterChainBuilder {
         val collectionToContainerConverter =
           buildConverterFromCollectionToContainer(toType)
 
-        val itemConverter = build(fromGenericArgument, toGenericArgument)
+        val itemConverter = build(fromGenericArgument, toGenericArgument, mapperSpec)
 
         val itemMapperSpec =
-          (fromGenericArgument.classifier as? KClass<*>)
-            ?.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
+          mapperSpec
+            ?: (fromGenericArgument.classifier as? KClass<*>)
+              ?.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
 
         AutoMapDynConverter { autoMapper: AutoMapper,
                               allowedCreationObjectClasses: Set<KClass<*>>,
@@ -116,7 +121,7 @@ internal object AutoMapConverterChainBuilder {
             val collectionToContainerConverter =
               buildConverterFromCollectionToContainer(toType)
 
-            val itemConverter = build(fromType, toGenericArgument)
+            val itemConverter = build(fromType, toGenericArgument, mapperSpec)
 
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
@@ -137,7 +142,7 @@ internal object AutoMapConverterChainBuilder {
             }
           }
 
-          fromKClass.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() -> {
+          mapperSpec != null || fromKClass.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() -> {
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
                                   allowedUpdateObjectClasses: Set<KClass<*>>,
@@ -150,7 +155,7 @@ internal object AutoMapConverterChainBuilder {
 
                 autoMapper
                   .internalCreateOrUpdateObjectByInput(
-                    input::class,
+                    mapperSpec ?: input::class,
                     allowedCreationObjectClasses,
                     allowedUpdateObjectClasses,
                     input,

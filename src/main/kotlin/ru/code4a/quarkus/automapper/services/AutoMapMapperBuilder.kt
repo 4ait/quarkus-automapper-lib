@@ -488,7 +488,11 @@ class AutoMapMapperBuilder {
     } else {
       AutoMapConverterChainBuilder.build(
         fromType = fromType,
-        toType = toType
+        toType = toType,
+        mapperSpec =
+          autoMapFieldAnnotation
+            ?.mapper
+            ?.takeUnless { mapper -> mapper == Object::class },
       )
     }
   }

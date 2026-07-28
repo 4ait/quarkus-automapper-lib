@@ -1,10 +1,12 @@
 package ru.code4a.quarkus.automapper.runtime
 
+import ru.code4a.quarkus.automapper.annotations.AutoMapField
 import ru.code4a.quarkus.automapper.annotations.AutoMapObjectFromInput
 import ru.code4a.quarkus.automapper.interfaces.AutoMapBatchExistingEntityLookup
 import ru.code4a.quarkus.automapper.interfaces.AutoMapExistingEntityConflictPolicy
 import ru.code4a.quarkus.automapper.interfaces.AutoMapExistingEntityLookup
 import ru.code4a.quarkus.automapper.interfaces.AutoMapExistingEntityLookupOrder
+import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpec
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpecTo
 import ru.code4a.quarkus.automapper.services.AutoMapBatchExistingEntityLookupContext
 import ru.code4a.quarkus.automapper.services.AutoMapExistingEntityLookupContext
@@ -81,6 +83,34 @@ class ExistingEntityLookupTest {
     assertEquals(listOf("new-1", "new-2"), contract.subjects.map { it.note })
     assertEquals(1, LookupState.batchLoads)
     assertEquals(contract, LookupState.batchParent)
+    assertEquals(0, LookupState.createdSubjects)
+  }
+
+  @Test
+  fun `external collection mapper uses its existing entity lookup`() {
+    val contract = LookupContractEntity("contract-external")
+    val existing = LookupSubjectEntity("link-external", contract.id, "subject-external", "old")
+    LookupState.subjectsByNaturalKey[contract.id to existing.subjectId] = existing
+
+    mapper(
+      ExternalLookupContractInput::class,
+      ExternalLookupSubjectInput::class,
+      ExternalLookupSubjectMapper::class,
+    ).updateObjectByInput(
+      mapperSpec = ExternalLookupContractInput::class,
+      allowedCreationObjectClasses = setOf(LookupSubjectEntity::class),
+      allowedUpdateObjectClasses = setOf(LookupContractEntity::class, LookupSubjectEntity::class),
+      input =
+        ExternalLookupContractInput(
+          id = contract.id,
+          subjects = listOf(ExternalLookupSubjectInput(null, existing.subjectId, "new")),
+        ),
+      obj = contract,
+    )
+
+    assertSame(existing, contract.subjects.single())
+    assertEquals("new", existing.note)
+    assertEquals(1, LookupState.batchLoads)
     assertEquals(0, LookupState.createdSubjects)
   }
 
@@ -377,6 +407,81 @@ class LookupSubjectInput(
   val subjectId: String,
   var note: String,
 ) : AutoMapperSpecTo<LookupSubjectEntity>
+
+object ExternalLookupSubjectByNaturalKey :
+  AutoMapBatchExistingEntityLookup<
+    ExternalLookupSubjectInput,
+    LookupSubjectEntity,
+    String,
+    ExternalLookupContractInput,
+    LookupContractEntity
+    > {
+
+  override fun getLookupKey(
+    input: ExternalLookupSubjectInput,
+    context: AutoMapExistingEntityLookupContext<
+      ExternalLookupSubjectInput,
+      LookupSubjectEntity,
+      ExternalLookupContractInput,
+      LookupContractEntity
+      >,
+  ): String = input.subjectId
+
+  override fun loadExisting(
+    keys: Set<String>,
+    inputs: List<ExternalLookupSubjectInput>,
+    context: AutoMapBatchExistingEntityLookupContext<
+      ExternalLookupSubjectInput,
+      LookupSubjectEntity,
+      ExternalLookupContractInput,
+      LookupContractEntity
+      >,
+  ): Map<String, LookupSubjectEntity> {
+    LookupState.batchLoads++
+    val parent = context.parentTarget as LookupContractEntity
+    return keys.mapNotNull { key ->
+      LookupState.subjectsByNaturalKey[parent.id to key]?.let { key to it }
+    }.toMap()
+  }
+}
+
+@AutoMapObjectFromInput(
+  idField = "id",
+  objectGetterClass = LookupContractById::class,
+  allowUpdate = true,
+  allowCreate = false,
+)
+class ExternalLookupContractInput(
+  var id: String?,
+  @get:AutoMapField(mapper = ExternalLookupSubjectMapper::class)
+  var subjects: List<ExternalLookupSubjectInput>,
+) : AutoMapperSpecTo<LookupContractEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = LookupSubjectById::class,
+  allowUpdate = true,
+)
+class ExternalLookupSubjectInput(
+  var id: String?,
+  val subjectId: String,
+  var note: String,
+) : AutoMapperSpecTo<LookupSubjectEntity>
+
+@AutoMapObjectFromInput(
+  constructMethod = "create",
+  idField = "id",
+  objectGetterClass = LookupSubjectById::class,
+  allowUpdate = true,
+  existingEntityLookupClasses = [ExternalLookupSubjectByNaturalKey::class],
+)
+abstract class ExternalLookupSubjectMapper :
+  AutoMapperSpec<ExternalLookupSubjectInput, LookupSubjectEntity> {
+  abstract val id: String?
+  abstract val subjectId: String
+  abstract val note: String
+}
 
 class OrderedLookupEntity(
   val id: String,
