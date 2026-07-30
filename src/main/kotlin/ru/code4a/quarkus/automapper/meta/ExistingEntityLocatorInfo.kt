@@ -6,8 +6,8 @@ import kotlin.reflect.KType
 
 internal abstract class ExistingEntityLocatorInfo(
   val locatorClass: KClass<*>,
-  val parentSourceType: KType,
-  val parentTargetType: KType,
+  val parentSourceType: KType?,
+  val parentTargetType: KType?,
 ) {
   abstract fun getLookupKey(input: Any, context: AutoMapMappingFrame): Any?
 
@@ -18,8 +18,8 @@ internal abstract class ExistingEntityLocatorInfo(
 
 internal class BatchExistingEntityLocatorInfo(
   locatorClass: KClass<*>,
-  parentSourceType: KType,
-  parentTargetType: KType,
+  parentSourceType: KType?,
+  parentTargetType: KType?,
   private val keyGetter: (Any, AutoMapMappingFrame) -> Any?,
   private val loader: (Set<Any>, List<Any>, AutoMapMappingFrame) -> Map<Any, Any>,
   private val validator: (Any, Any, AutoMapMappingFrame) -> Unit,

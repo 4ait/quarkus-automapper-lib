@@ -4,13 +4,17 @@ import ru.code4a.quarkus.automapper.interfaces.AutoMapTypeConverter
 import ru.code4a.quarkus.automapper.utils.nullable.unwrapElseError
 import kotlin.reflect.KClass
 import kotlin.reflect.KType
-import kotlin.reflect.full.createInstance
 import kotlin.reflect.full.isSubtypeOf
 import kotlin.reflect.full.isSupertypeOf
 import kotlin.reflect.full.memberFunctions
 import kotlin.reflect.full.valueParameters
 
 internal object AutoMapTypeConverterIntrospector {
+
+  class IntrospectedConverterContract(
+    val inputType: KType,
+    val outputType: KType,
+  )
 
   class IntrospectedConverter(
     val instance: AutoMapTypeConverter<Any?, Any?>,
@@ -19,8 +23,25 @@ internal object AutoMapTypeConverterIntrospector {
   )
 
   fun introspect(
-    typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>
+    typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>,
+    componentResolver: AutoMapComponentResolver,
   ): IntrospectedConverter {
+    val contract = introspectContract(typeConverterClass)
+
+    @Suppress("UNCHECKED_CAST")
+    val instance =
+      componentResolver.resolveOrCreate(typeConverterClass) as AutoMapTypeConverter<Any?, Any?>
+
+    return IntrospectedConverter(
+      instance = instance,
+      inputType = contract.inputType,
+      outputType = contract.outputType,
+    )
+  }
+
+  fun introspectContract(
+    typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>,
+  ): IntrospectedConverterContract {
     val convertFunctions =
       typeConverterClass
         .memberFunctions
@@ -47,15 +68,7 @@ internal object AutoMapTypeConverterIntrospector {
 
     val outputType = convertFunction.returnType
 
-    @Suppress("UNCHECKED_CAST")
-    val instance =
-      (
-        typeConverterClass.objectInstance
-          ?: typeConverterClass.createInstance()
-        ) as AutoMapTypeConverter<Any?, Any?>
-
-    return IntrospectedConverter(
-      instance = instance,
+    return IntrospectedConverterContract(
       inputType = inputType,
       outputType = outputType,
     )
@@ -65,22 +78,47 @@ internal object AutoMapTypeConverterIntrospector {
     typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>,
     fromType: KType,
     toType: KType,
+    contract: IntrospectedConverterContract,
+  ) {
+    requireCompatibility(
+      typeConverterClass = typeConverterClass,
+      fromType = fromType,
+      toType = toType,
+      inputType = contract.inputType,
+      outputType = contract.outputType,
+    )
+  }
+
+  fun requireCompatibility(
+    typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>,
+    fromType: KType,
+    toType: KType,
     introspectedConverter: IntrospectedConverter,
   ) {
-    require(
-      introspectedConverter.inputType.isSupertypeOf(fromType) ||
-        introspectedConverter.inputType == fromType
-    ) {
+    requireCompatibility(
+      typeConverterClass = typeConverterClass,
+      fromType = fromType,
+      toType = toType,
+      inputType = introspectedConverter.inputType,
+      outputType = introspectedConverter.outputType,
+    )
+  }
+
+  private fun requireCompatibility(
+    typeConverterClass: KClass<out AutoMapTypeConverter<*, *>>,
+    fromType: KType,
+    toType: KType,
+    inputType: KType,
+    outputType: KType,
+  ) {
+    require(inputType.isSupertypeOf(fromType) || inputType == fromType) {
       "First argument of converter $typeConverterClass " +
-        "(${introspectedConverter.inputType}) is not compatible with $fromType"
+        "($inputType) is not compatible with $fromType"
     }
 
-    require(
-      introspectedConverter.outputType.isSubtypeOf(toType) ||
-        introspectedConverter.outputType == toType
-    ) {
+    require(outputType.isSubtypeOf(toType) || outputType == toType) {
       "Return type of converter $typeConverterClass " +
-        "(${introspectedConverter.outputType}) is not compatible with $toType"
+        "($outputType) is not compatible with $toType"
     }
   }
 }

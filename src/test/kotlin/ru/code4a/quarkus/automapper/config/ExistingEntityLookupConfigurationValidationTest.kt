@@ -1,17 +1,76 @@
 package ru.code4a.quarkus.automapper.config
 
+import org.jboss.jandex.DotName
+import org.jboss.jandex.Index
 import ru.code4a.quarkus.automapper.annotations.AutoMapObjectFromInput
+import ru.code4a.quarkus.automapper.builds.AutoMapExistingEntityLocatorBuildTimeValidator
 import ru.code4a.quarkus.automapper.interfaces.AutoMapBatchExistingEntityLookup
+import ru.code4a.quarkus.automapper.interfaces.AutoMapExistingEntityLocator
 import ru.code4a.quarkus.automapper.interfaces.AutoMapExistingEntityLookup
+import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpec
 import ru.code4a.quarkus.automapper.interfaces.AutoMapperSpecTo
 import ru.code4a.quarkus.automapper.services.AutoMapBatchExistingEntityLookupContext
 import ru.code4a.quarkus.automapper.services.AutoMapExistingEntityLookupContext
+import ru.code4a.quarkus.automapper.services.AutoMapExistingEntityLocatorKind
 import ru.code4a.quarkus.automapper.services.AutoMapMapperBuilder
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFails
 import kotlin.test.assertTrue
 
 class ExistingEntityLookupConfigurationValidationTest {
+
+  @Test
+  fun `valid lookup generic contract is resolved during augmentation`() {
+    val contracts =
+      AutoMapExistingEntityLocatorBuildTimeValidator.validate(
+        buildIndex(
+          ValidLocatorInput::class.java,
+          ValidBuildTimeLocator::class.java,
+          BuildTimeLocatorEntity::class.java,
+        )
+      )
+
+    assertEquals(
+      AutoMapExistingEntityLocatorKind.SINGLE,
+      contracts[DotName.createSimple(ValidBuildTimeLocator::class.java)],
+    )
+  }
+
+  @Test
+  fun `incompatible lookup input type fails during augmentation`() {
+    val failure =
+      assertFails {
+        AutoMapExistingEntityLocatorBuildTimeValidator.validate(
+          buildIndex(
+            WrongInputLocatorInput::class.java,
+            WrongInputBuildTimeLocator::class.java,
+            OtherBuildTimeInput::class.java,
+            BuildTimeLocatorEntity::class.java,
+          )
+        )
+      }
+
+    assertTrue(failure.message.orEmpty().contains("input type"))
+  }
+
+  @Test
+  fun `incompatible lookup parent types fail during augmentation`() {
+    val failure =
+      assertFails {
+        AutoMapExistingEntityLocatorBuildTimeValidator.validate(
+          buildIndex(
+            BuildTimeParentInput::class.java,
+            BuildTimeParentEntity::class.java,
+            ValidBatchLocatorInput::class.java,
+            ValidBatchBuildTimeLocator::class.java,
+            BuildTimeLocatorEntity::class.java,
+          )
+        )
+      }
+
+    assertTrue(failure.message.orEmpty().contains("parent source type"))
+  }
 
   @Test
   fun `valid lookup types are initialized while mapper metadata is built`() {
@@ -55,6 +114,20 @@ class ExistingEntityLookupConfigurationValidationTest {
     assertTrue(
       failure.message.orEmpty().contains(messagePart),
       "Expected '${failure.message}' to contain '$messagePart'",
+    )
+  }
+
+  private fun buildIndex(vararg applicationClasses: Class<*>): Index {
+    return Index.of(
+      listOf(
+        AutoMapObjectFromInput::class.java,
+        AutoMapperSpec::class.java,
+        AutoMapperSpecTo::class.java,
+        AutoMapExistingEntityLocator::class.java,
+        AutoMapExistingEntityLookup::class.java,
+        AutoMapBatchExistingEntityLookup::class.java,
+        *applicationClasses,
+      )
     )
   }
 }

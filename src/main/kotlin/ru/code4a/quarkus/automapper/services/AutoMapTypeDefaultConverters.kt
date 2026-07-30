@@ -5,77 +5,67 @@ import ru.code4a.quarkus.automapper.utils.cast.castElseError
 import ru.code4a.quarkus.automapper.utils.nullable.unwrapElseError
 import kotlin.reflect.KClass
 
-object AutoMapTypeDefaultConverters {
-
-  private val fromToConvertersMap: Map<Pair<Class<Any>, Class<Any>>, AutoMapTypeConverter<Any, Any>>
-
-  init {
+internal class AutoMapTypeDefaultConverters(
+  private val componentResolver: AutoMapComponentResolver,
+) {
+  private val fromToConvertersMap: Map<Pair<Class<Any>, Class<Any>>, AutoMapTypeConverter<Any, Any>> by lazy {
     val classLoader = Thread.currentThread().contextClassLoader
-
     val converterClassNames =
       classLoader
         .getResource("ru/code4a/quarkus/automapper/automaptypeconverters")
-        .unwrapElseError { "Cannot find resource /ru/code4a/quarkus/automapper/automaptypeconverters" }
-        .readText()
-        .split("\n")
+        ?.readText()
+        .orEmpty()
+        .lineSequence()
+        .filter(String::isNotBlank)
+        .toList()
 
-    fromToConvertersMap =
-      converterClassNames.associate { converterClassName ->
-        val converterClass = classLoader.loadClass(converterClassName)
+    converterClassNames.associate { converterClassName ->
+      val converterClass = classLoader.loadClass(converterClassName)
+      val converterKClass = converterClass.kotlin
+      val typeConverterSupertype =
+        converterKClass
+          .supertypes
+          .find { klass ->
+            klass.classifier.unwrapElseError {
+              "Supertype of $converterClassName must have classifier"
+            } as KClass<*> == AutoMapTypeConverter::class
+          }
+          .unwrapElseError {
+            "Auto map class converter $converterClassName must extend AutoMapTypeConverter"
+          }
 
-        val converterKClass = converterClass.kotlin
+      val fromKClass =
+        typeConverterSupertype.arguments.firstOrNull()
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have first argument" }
+          .type
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have type for first argument" }
+          .classifier
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have classifier for first argument" }
+          .castElseError<KClass<*>> {
+            "AutoMapTypeConverter of $converterClassName must have classifier as KClass for first argument"
+          }
 
-        val typeConverterSupertype =
-          converterKClass
-            .supertypes
-            .find { klass ->
-              klass
-                .classifier
-                .unwrapElseError {
-                  "Supertype of $converterClassName must have classifier"
-                } as KClass<*> == AutoMapTypeConverter::class
-            }
-            .unwrapElseError {
-              "Auto map class converter $converterClassName must extend AutoMapTypeConverter"
-            }
+      val toKClass =
+        typeConverterSupertype.arguments.getOrNull(1)
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have second argument" }
+          .type
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have type for second argument" }
+          .classifier
+          .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have classifier for second argument" }
+          .castElseError<KClass<*>> {
+            "AutoMapTypeConverter of $converterClassName must have classifier as KClass for second argument"
+          }
 
-        val fromKClass =
-          typeConverterSupertype
-            .arguments
-            .firstOrNull()
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have first argument" }
-            .type
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have type for first argument" }
-            .classifier
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have classifier for first argument" }
-            .castElseError<KClass<*>> {
-              "AutoMapTypeConverter of $converterClassName must have classifier as KClass for first argument"
-            }
+      @Suppress("UNCHECKED_CAST")
+      val converter =
+        componentResolver
+          .resolveOrCreate(converterKClass)
+          .castElseError<AutoMapTypeConverter<Any, Any>> {
+            "Cannot resolve $converterClass as AutoMapTypeConverter<Any, Any>"
+          }
 
-        val toKClass =
-          typeConverterSupertype
-            .arguments
-            .getOrNull(1)
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have second argument" }
-            .type
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have type for second argument" }
-            .classifier
-            .unwrapElseError { "AutoMapTypeConverter of $converterClassName must have classifier for second argument" }
-            .castElseError<KClass<*>> {
-              "AutoMapTypeConverter of $converterClassName must have classifier as KClass for second argument"
-            }
-
-        val converterObj =
-          converterClass
-            .constructors
-            .first()
-            .newInstance()
-            .castElseError<AutoMapTypeConverter<Any, Any>> {
-              "Cannot cast constructor of $converterClass to AutoMapTypeConverter<Any, Any>"
-            }
-
-        (Pair(fromKClass.java as Class<Any>, toKClass.java as Class<Any>) to converterObj)
-      }
+      Pair(fromKClass.java as Class<Any>, toKClass.java as Class<Any>) to converter
+    }
   }
 
   fun getDefaultConverter(fromClass: Class<Any>, toClass: Class<Any>): AutoMapTypeConverter<Any, Any> {

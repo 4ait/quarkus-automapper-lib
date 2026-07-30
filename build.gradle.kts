@@ -104,6 +104,7 @@ val quarkusVersion: String by project
 
 dependencies {
   implementation("io.quarkus:quarkus-arc:${quarkusVersion}")
+  implementation("io.quarkus:quarkus-arc-deployment:${quarkusVersion}")
 
   implementation(kotlin("reflect"))
 

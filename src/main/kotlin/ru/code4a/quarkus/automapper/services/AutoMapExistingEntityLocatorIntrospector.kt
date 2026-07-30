@@ -12,14 +12,150 @@ import kotlin.reflect.full.allSupertypes
 import kotlin.reflect.full.starProjectedType
 import kotlin.reflect.full.withNullability
 
-/** Builds type-erased execution adapters after validating every generic contract. */
+/** Builds type-erased execution adapters from build-time validated locator metadata. */
 internal object AutoMapExistingEntityLocatorIntrospector {
+
+  class Blueprint(
+    private val preparedBinding: AutoMapBinding<ExistingEntityLocatorInfo>,
+  ) {
+    fun bind(componentResolver: AutoMapComponentResolver): ExistingEntityLocatorInfo {
+      return binding().bind(componentResolver)
+    }
+
+    fun binding(): AutoMapBinding<ExistingEntityLocatorInfo> {
+      return preparedBinding
+    }
+  }
 
   fun introspect(
     locatorClass: KClass<out AutoMapExistingEntityLocator<*, *, *, *, *>>,
     inputKClass: KClass<*>,
     targetKClass: KClass<*>,
+    componentResolver: AutoMapComponentResolver,
+    prevalidatedKind: AutoMapExistingEntityLocatorKind? = null,
   ): ExistingEntityLocatorInfo {
+    return blueprint(
+      locatorClass = locatorClass,
+      inputKClass = inputKClass,
+      targetKClass = targetKClass,
+      prevalidatedKind = prevalidatedKind,
+    ).bind(componentResolver)
+  }
+
+  fun blueprint(
+    locatorClass: KClass<out AutoMapExistingEntityLocator<*, *, *, *, *>>,
+    inputKClass: KClass<*>,
+    targetKClass: KClass<*>,
+    prevalidatedKind: AutoMapExistingEntityLocatorKind? = null,
+    componentReferences: AutoMapComponentReferences? = null,
+  ): Blueprint {
+    val runtimeContract =
+      if (prevalidatedKind == null) {
+        inspectAndValidateRuntimeContract(locatorClass, inputKClass, targetKClass)
+      } else {
+        null
+      }
+    val kind = prevalidatedKind ?: runtimeContract!!.kind
+    @Suppress("UNCHECKED_CAST")
+    val typedLocatorClass =
+      locatorClass as KClass<AutoMapExistingEntityLocator<*, *, *, *, *>>
+    val missingMessage = {
+      "Existing entity lookup $locatorClass must be an object instance or an @ApplicationScoped CDI bean"
+    }
+    val infoBinding =
+      if (componentReferences == null) {
+        componentBinding(
+          componentClass = typedLocatorClass,
+          missingMessage = missingMessage,
+        ).map { instance ->
+          createInfo(
+            locatorClass,
+            kind,
+            runtimeContract?.parentSourceType,
+            runtimeContract?.parentTargetType,
+          ) { instance }
+        }
+      } else {
+        val reference =
+          componentReferences.reference(
+            componentClass = typedLocatorClass,
+            missingMessage = missingMessage,
+          )
+        AutoMapBinding.fixed(
+          createInfo(
+            locatorClass,
+            kind,
+            runtimeContract?.parentSourceType,
+            runtimeContract?.parentTargetType,
+          ) { reference.get() }
+        )
+      }
+
+    return Blueprint(infoBinding)
+  }
+
+  private fun createInfo(
+    locatorClass: KClass<out AutoMapExistingEntityLocator<*, *, *, *, *>>,
+    kind: AutoMapExistingEntityLocatorKind,
+    parentSourceType: KType?,
+    parentTargetType: KType?,
+    instance: () -> AutoMapExistingEntityLocator<*, *, *, *, *>,
+  ): ExistingEntityLocatorInfo {
+    @Suppress("UNCHECKED_CAST")
+    return when (kind) {
+      AutoMapExistingEntityLocatorKind.SINGLE -> {
+        ExistingEntityLocatorInfoAdapter(
+          locatorClass = locatorClass,
+          parentSourceType = parentSourceType,
+          parentTargetType = parentTargetType,
+          keyGetter = { input, context ->
+            val locator = instance() as AutoMapExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.getLookupKey(input, context.toLookupContext())
+          },
+          finder = { input, context ->
+            val locator = instance() as AutoMapExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.findExisting(input, context.toLookupContext())
+          },
+          validator = { target, input, context ->
+            val locator = instance() as AutoMapExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.validateExisting(target, input, context.toLookupContext())
+          },
+        )
+      }
+
+      AutoMapExistingEntityLocatorKind.BATCH -> {
+        BatchExistingEntityLocatorInfo(
+          locatorClass = locatorClass,
+          parentSourceType = parentSourceType,
+          parentTargetType = parentTargetType,
+          keyGetter = { input, context ->
+            val locator = instance() as AutoMapBatchExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.getLookupKey(input, context.toLookupContext())
+          },
+          loader = { keys, inputs, context ->
+            val locator = instance() as AutoMapBatchExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.loadExisting(keys, inputs, context.toBatchLookupContext(inputs))
+          },
+          validator = { target, input, context ->
+            val locator = instance() as AutoMapBatchExistingEntityLookup<Any, Any, Any, Any, Any>
+            locator.validateExisting(target, input, context.toLookupContext())
+          },
+        )
+      }
+    }
+  }
+
+  private class RuntimeContract(
+    val kind: AutoMapExistingEntityLocatorKind,
+    val parentSourceType: KType,
+    val parentTargetType: KType,
+  )
+
+  private fun inspectAndValidateRuntimeContract(
+    locatorClass: KClass<out AutoMapExistingEntityLocator<*, *, *, *, *>>,
+    inputKClass: KClass<*>,
+    targetKClass: KClass<*>,
+  ): RuntimeContract {
     val supportedSuperTypes =
       locatorClass.allSupertypes.filter { type ->
         val classifier = type.classifier as? KClass<*>
@@ -45,53 +181,16 @@ internal object AutoMapExistingEntityLocatorIntrospector {
     requireConcrete(locatorClass, "parent source", parentSourceType)
     requireConcrete(locatorClass, "parent target", parentTargetType)
 
-    val instance =
-      locatorClass.objectInstance.unwrapElseError {
-        "Existing entity lookup $locatorClass must be an object instance"
-      }
-
-    @Suppress("UNCHECKED_CAST")
-    return when (locatorType.classifier) {
-      AutoMapExistingEntityLookup::class -> {
-        val locator =
-          instance as AutoMapExistingEntityLookup<Any, Any, Any, Any, Any>
-        ExistingEntityLocatorInfoAdapter(
-          locatorClass = locatorClass,
-          parentSourceType = parentSourceType,
-          parentTargetType = parentTargetType,
-          keyGetter = { input, context ->
-            locator.getLookupKey(input, context.toLookupContext())
-          },
-          finder = { input, context ->
-            locator.findExisting(input, context.toLookupContext())
-          },
-          validator = { target, input, context ->
-            locator.validateExisting(target, input, context.toLookupContext())
-          },
-        )
-      }
-
-      AutoMapBatchExistingEntityLookup::class -> {
-        val locator =
-          instance as AutoMapBatchExistingEntityLookup<Any, Any, Any, Any, Any>
-        BatchExistingEntityLocatorInfo(
-          locatorClass = locatorClass,
-          parentSourceType = parentSourceType,
-          parentTargetType = parentTargetType,
-          keyGetter = { input, context ->
-            locator.getLookupKey(input, context.toLookupContext())
-          },
-          loader = { keys, inputs, context ->
-            locator.loadExisting(keys, inputs, context.toBatchLookupContext(inputs))
-          },
-          validator = { target, input, context ->
-            locator.validateExisting(target, input, context.toLookupContext())
-          },
-        )
-      }
-
-      else -> error("Unsupported existing entity lookup $locatorClass")
-    }
+    return RuntimeContract(
+      kind =
+        when (locatorType.classifier) {
+          AutoMapExistingEntityLookup::class -> AutoMapExistingEntityLocatorKind.SINGLE
+          AutoMapBatchExistingEntityLookup::class -> AutoMapExistingEntityLocatorKind.BATCH
+          else -> error("Unsupported existing entity lookup $locatorClass")
+        },
+      parentSourceType = parentSourceType,
+      parentTargetType = parentTargetType,
+    )
   }
 
   private fun AutoMapMappingFrame.toLookupContext():
@@ -149,8 +248,8 @@ internal object AutoMapExistingEntityLocatorIntrospector {
 
   private class ExistingEntityLocatorInfoAdapter(
     locatorClass: KClass<*>,
-    parentSourceType: KType,
-    parentTargetType: KType,
+    parentSourceType: KType?,
+    parentTargetType: KType?,
     private val keyGetter: (Any, AutoMapMappingFrame) -> Any?,
     private val finder: (Any, AutoMapMappingFrame) -> Any?,
     private val validator: (Any, Any, AutoMapMappingFrame) -> Unit,

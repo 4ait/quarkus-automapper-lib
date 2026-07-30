@@ -14,14 +14,34 @@ import kotlin.reflect.full.withNullability
 
 internal object AutoMapObjectGetterIntrospector {
 
+  class IntrospectedGetterContract(
+    val getterFunction: kotlin.reflect.KFunction<*>,
+  )
+
   class IntrospectedGetter(
     val instance: Any,
     val getterFunction: kotlin.reflect.KFunction<*>,
   )
 
   fun introspect(
-    objectGetterClass: KClass<*>
+    objectGetterClass: KClass<*>,
+    componentResolver: AutoMapComponentResolver,
   ): IntrospectedGetter {
+    val contract = introspectContract(objectGetterClass)
+    val instance =
+      componentResolver.resolveOrNull(objectGetterClass)
+        .unwrapElseError {
+          "Object Instance must be present for class $objectGetterClass unless it is an " +
+            "@ApplicationScoped CDI bean"
+        }
+
+    return IntrospectedGetter(
+      instance = instance,
+      getterFunction = contract.getterFunction,
+    )
+  }
+
+  fun introspectContract(objectGetterClass: KClass<*>): IntrospectedGetterContract {
     val getterFunctions =
       objectGetterClass
         .memberFunctions
@@ -41,15 +61,22 @@ internal object AutoMapObjectGetterIntrospector {
       "Getter function $getterFunction of entity getter class $objectGetterClass must have 2 parameters"
     }
 
-    val instance =
-      objectGetterClass.objectInstance
-        .unwrapElseError {
-          "Object Instance must be present for class $objectGetterClass"
-        }
-
-    return IntrospectedGetter(
-      instance = instance,
+    return IntrospectedGetterContract(
       getterFunction = getterFunction,
+    )
+  }
+
+  fun requireCompatibility(
+    objectGetterClass: KClass<*>,
+    objectKClass: KClass<*>,
+    idType: KType,
+    introspectedGetter: IntrospectedGetterContract,
+  ) {
+    requireCompatibility(
+      objectGetterClass = objectGetterClass,
+      objectKClass = objectKClass,
+      idType = idType,
+      getterFunction = introspectedGetter.getterFunction,
     )
   }
 
@@ -59,14 +86,27 @@ internal object AutoMapObjectGetterIntrospector {
     idType: KType,
     introspectedGetter: IntrospectedGetter,
   ) {
+    requireCompatibility(
+      objectGetterClass = objectGetterClass,
+      objectKClass = objectKClass,
+      idType = idType,
+      getterFunction = introspectedGetter.getterFunction,
+    )
+  }
+
+  private fun requireCompatibility(
+    objectGetterClass: KClass<*>,
+    objectKClass: KClass<*>,
+    idType: KType,
+    getterFunction: kotlin.reflect.KFunction<*>,
+  ) {
     val entityClassType =
       KClass::class.createType(
         arguments = listOf(KTypeProjection.invariant(objectKClass.starProjectedType))
       )
 
     val entityClassParameterType =
-      introspectedGetter
-        .getterFunction
+      getterFunction
         .valueParameters
         .firstOrNull()
         ?.type
@@ -86,8 +126,7 @@ internal object AutoMapObjectGetterIntrospector {
       idType.withNullability(false)
 
     val idParameterType =
-      introspectedGetter
-        .getterFunction
+      getterFunction
         .valueParameters
         .getOrNull(1)
         ?.type
@@ -104,7 +143,7 @@ internal object AutoMapObjectGetterIntrospector {
     }
 
     val expectedReturnType = objectKClass.starProjectedType
-    val returnType = introspectedGetter.getterFunction.returnType
+    val returnType = getterFunction.returnType
 
     require(
       returnType.isSupertypeOf(expectedReturnType) ||

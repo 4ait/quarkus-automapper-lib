@@ -23,6 +23,7 @@ internal object AutoMapConverterChainBuilder {
   fun build(
     fromType: KType,
     toType: KType,
+    defaultConverters: AutoMapTypeDefaultConverters,
     mapperSpec: KClass<*>? = null,
   ): AutoMapDynConverter {
     val fromKClass =
@@ -62,7 +63,7 @@ internal object AutoMapConverterChainBuilder {
         val collectionToContainerConverter =
           buildConverterFromCollectionToContainer(toType)
 
-        val itemConverter = build(fromGenericArgument, toGenericArgument, mapperSpec)
+        val itemConverter = build(fromGenericArgument, toGenericArgument, defaultConverters, mapperSpec)
 
         val itemMapperSpec =
           mapperSpec
@@ -121,7 +122,7 @@ internal object AutoMapConverterChainBuilder {
             val collectionToContainerConverter =
               buildConverterFromCollectionToContainer(toType)
 
-            val itemConverter = build(fromType, toGenericArgument, mapperSpec)
+            val itemConverter = build(fromType, toGenericArgument, defaultConverters, mapperSpec)
 
             AutoMapDynConverter { autoMapper: AutoMapper,
                                   allowedCreationObjectClasses: Set<KClass<*>>,
@@ -169,7 +170,7 @@ internal object AutoMapConverterChainBuilder {
 
           fromType.classifier.castNullableElseError<KClass<*>> { "Type $fromType is not a class" } != toKClass -> {
             val defaultConverter =
-              AutoMapTypeDefaultConverters.getDefaultConverter(
+              defaultConverters.getDefaultConverter(
                 (fromType.classifier.castNullableElseError<KClass<*>> { "Type $fromType is not a class" }).java as Class<Any>,
                 toKClass.java as Class<Any>
               )
@@ -205,6 +206,179 @@ internal object AutoMapConverterChainBuilder {
       }
     }
 
+  }
+
+  /** Performs all type inspection during STATIC_INIT and leaves only component binding for runtime. */
+  fun buildBlueprint(
+    fromType: KType,
+    toType: KType,
+    defaultConverters: AutoMapTypeDefaultConvertersBlueprint,
+    componentReferences: AutoMapComponentReferences,
+    mapperSpec: KClass<*>? = null,
+  ): AutoMapBinding<AutoMapDynConverter> {
+    val fromKClass =
+      fromType.classifier.castNullableElseError<KClass<*>> {
+        "From type $fromType is not a class"
+      }
+
+    if (fromType.isMarkedNullable && !toType.isMarkedNullable) {
+      error("Types $fromType and $toType is not compilable")
+    }
+
+    val canBeProcessed =
+      if (fromType.isMarkedNullable) {
+        { input: Any? -> input != null }
+      } else {
+        { _: Any? -> true }
+      }
+
+    return when {
+      fromKClass.isSubclassOf(Collection::class) -> {
+        val fromGenericArgument =
+          fromType.arguments[0].type
+            ?: error("Value type $fromType have not generic type. But should. Maybe types mismatched")
+        val toGenericArgument =
+          toType.arguments[0].type
+            ?: error("Value type $toType have not generic type. But should. Maybe types mismatched")
+        val collectionToContainerConverter = buildConverterFromCollectionToContainer(toType)
+        val itemConverterBinding =
+          buildBlueprint(
+            fromGenericArgument,
+            toGenericArgument,
+            defaultConverters,
+            componentReferences,
+            mapperSpec,
+          )
+        val itemMapperSpec =
+          mapperSpec
+            ?: (fromGenericArgument.classifier as? KClass<*>)
+              ?.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
+
+        itemConverterBinding.map { itemConverter ->
+          AutoMapDynConverter { autoMapper,
+                                allowedCreationObjectClasses,
+                                allowedUpdateObjectClasses,
+                                mappingContext,
+                                input ->
+            if (canBeProcessed(input)) {
+              if (input == null) error("Input must be present")
+              val inputCollection = input as Collection<Any?>
+
+              if (itemMapperSpec != null) {
+                autoMapper.prepareExistingEntityLookups(
+                  mapperSpec = itemMapperSpec,
+                  inputs = inputCollection.filterNotNull(),
+                  parentContext = mappingContext,
+                )
+              }
+
+              collectionToContainerConverter(
+                inputCollection.map { item ->
+                  itemConverter.convert(
+                    autoMapper = autoMapper,
+                    allowedCreationObjectClasses = allowedCreationObjectClasses,
+                    allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                    mappingContext = mappingContext,
+                    input = item,
+                  )
+                }
+              )
+            } else {
+              null
+            }
+          }
+        }
+      }
+
+      else -> {
+        val toKClass =
+          toType.classifier.castNullableElseError<KClass<*>> { "To type $toType is not a class" }
+
+        when {
+          toKClass.isSubclassOf(Collection::class) -> {
+            val toGenericArgument =
+              toType.arguments[0].type
+                ?: error("Value type $toType have not generic type. But should. Maybe types mismatched")
+            val collectionToContainerConverter = buildConverterFromCollectionToContainer(toType)
+            val itemConverterBinding =
+              buildBlueprint(
+                fromType,
+                toGenericArgument,
+                defaultConverters,
+                componentReferences,
+                mapperSpec,
+              )
+
+            itemConverterBinding.map { itemConverter ->
+              AutoMapDynConverter { autoMapper,
+                                    allowedCreationObjectClasses,
+                                    allowedUpdateObjectClasses,
+                                    mappingContext,
+                                    input ->
+                collectionToContainerConverter(
+                  listOf(
+                    itemConverter.convert(
+                      autoMapper = autoMapper,
+                      allowedCreationObjectClasses = allowedCreationObjectClasses,
+                      allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                      mappingContext = mappingContext,
+                      input = input,
+                    )
+                  )
+                )
+              }
+            }
+          }
+
+          mapperSpec != null || fromKClass.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() -> {
+            AutoMapBinding.fixed(
+              AutoMapDynConverter { autoMapper,
+                                    allowedCreationObjectClasses,
+                                    allowedUpdateObjectClasses,
+                                    mappingContext,
+                                    input ->
+                if (canBeProcessed(input)) {
+                  if (input == null) error("Input must be present")
+                  autoMapper.internalCreateOrUpdateObjectByInput(
+                    mapperSpec = mapperSpec ?: input::class,
+                    allowedCreationObjectClasses = allowedCreationObjectClasses,
+                    allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+                    input = input,
+                    parentContext = mappingContext,
+                  )
+                } else {
+                  null
+                }
+              }
+            )
+          }
+
+          fromKClass != toKClass -> {
+            @Suppress("UNCHECKED_CAST")
+            val defaultConverterReference =
+              defaultConverters.getDefaultConverterReference(
+                fromKClass.java as Class<Any>,
+                toKClass.java as Class<Any>,
+                componentReferences,
+              )
+
+            AutoMapBinding.fixed(
+              AutoMapDynConverter { _, _, _, _, input ->
+                if (canBeProcessed(input)) {
+                  defaultConverterReference.get().convert(
+                    input.unwrapElseError { "input must not be null" }
+                  )
+                } else {
+                  null
+                }
+              }
+            )
+          }
+
+          else -> AutoMapBinding.fixed(AutoMapDynConverter { _, _, _, _, input -> input })
+        }
+      }
+    }
   }
 
 

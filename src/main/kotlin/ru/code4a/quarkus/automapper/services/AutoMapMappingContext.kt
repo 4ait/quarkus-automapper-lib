@@ -29,10 +29,6 @@ class AutoMapExistingEntityLookupContext<
     @Suppress("UNCHECKED_CAST")
     return operation.values[key] as VALUE?
   }
-
-  fun <SERVICE : Any> getService(serviceClass: KClass<SERVICE>): SERVICE {
-    return ArcService.getFromClass(serviceClass.java)
-  }
 }
 
 /** Strongly typed context exposed to a batch existing-entity lookup. */
@@ -55,10 +51,6 @@ class AutoMapBatchExistingEntityLookupContext<
   fun <VALUE : Any> get(key: AutoMapContextKey<VALUE>): VALUE? {
     @Suppress("UNCHECKED_CAST")
     return operation.values[key] as VALUE?
-  }
-
-  fun <SERVICE : Any> getService(serviceClass: KClass<SERVICE>): SERVICE {
-    return ArcService.getFromClass(serviceClass.java)
   }
 }
 

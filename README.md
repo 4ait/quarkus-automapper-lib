@@ -110,6 +110,26 @@ fun createCamera(newCameraInput: NewCameraInput): CreateCameraResult {
 
 ## Core Concepts
 
+### CDI Components (Recommended)
+
+Declare custom AutoMapper components as `@ApplicationScoped` classes and use constructor injection for their
+dependencies. This is the recommended mode for production applications:
+
+```kotlin
+@ApplicationScoped
+class PhoneNumberConverter(
+  private val phoneNumberService: PhoneNumberService,
+) : AutoMapTypeConverter<String, PhoneNumber> {
+  override fun convert(value: String): PhoneNumber {
+    return phoneNumberService.parse(value)
+  }
+}
+```
+
+Constructor injection is supported for type converters, field validators, naming strategies, entity getters, and
+existing-entity lookup classes. Kotlin `object` implementations remain supported for stateless components and
+compatibility.
+
 ### AutoMap Annotations
 
 #### @AutoMapObjectFromInput
@@ -145,17 +165,18 @@ This annotation provides fine-grained control over field mapping.
 
 ### Field Update Validators
 
-Use `updateValidatorClass` to validate a mapped field during `UPDATE`, after conversion/create/update of the field
-value but before assignment to the parent object.
+Use `updateValidatorClass` to validate a mapped field during `UPDATE`, after conversion/create/update of the field value
+but before assignment to the parent object.
 
 ```kotlin
-object SubjectPhonesOwnershipValidator :
+@ApplicationScoped
+class SubjectPhonesOwnershipValidator :
   AutoMapFieldUpdateValidator<
     SubjectDomainEntity,
     Set<SubjectPhoneDomainEntity>,
     Set<SubjectPhoneDomainEntity>,
     List<SubjectPhoneInput>
-  > {
+    > {
 
   override fun validate(
     parent: SubjectDomainEntity,
@@ -182,8 +203,9 @@ class UpdateSubjectInput(
 ```
 
 Notes:
-- Update validator generics are validated during mapper initialization. Incompatible `parent/current/new/input` types
-  fail fast on application startup with a readable error.
+
+- Update validator generics are validated before the application starts. Incompatible `parent/current/new/input` types
+  fail fast with a readable error.
 - Update validators are invoked only for `UPDATE`.
 - Update validators are not supported for in-place nested updates on fields without a setter. Such configuration fails
   fast on startup because the mapper cannot provide a stable `currentValue/newValue` boundary there.
@@ -202,9 +224,12 @@ Create custom type converters by implementing the `AutoMapTypeConverter` interfa
 
 ```kotlin
 @AutoMapTypeConverterDefault
-class StringToPhoneNumberAutoMapTypeConverter : AutoMapTypeConverter<String, PhoneNumber> {
+@ApplicationScoped
+class StringToPhoneNumberAutoMapTypeConverter(
+  private val phoneNumberService: PhoneNumberService,
+) : AutoMapTypeConverter<String, PhoneNumber> {
   override fun convert(value: String): PhoneNumber {
-    // Conversion logic
+    return phoneNumberService.parse(value)
   }
 }
 ```
@@ -214,7 +239,8 @@ class StringToPhoneNumberAutoMapTypeConverter : AutoMapTypeConverter<String, Pho
 Implement `AutoMapFieldNamingStrategy` to customize field name mapping:
 
 ```kotlin
-object RemoveLastIdAndIdsAutoMapFieldNamingStrategy : AutoMapFieldNamingStrategy {
+@ApplicationScoped
+class RemoveLastIdAndIdsAutoMapFieldNamingStrategy : AutoMapFieldNamingStrategy {
   override fun getObjectFieldName(inputName: String): String {
     return when {
       inputName.endsWith("Id") -> inputName.removeSuffix("Id")
@@ -279,14 +305,15 @@ class ChildInput(
 For retrieving entities during update operations, implement a custom entity getter:
 
 ```kotlin
-@RegisterForReflection
-object AutoMapInputEntityGetterByNodeId {
+@ApplicationScoped
+class AutoMapInputEntityGetterByNodeId(
+  private val graphqlRelayNodeManager: GraphqlRelayNodeManager,
+) {
   @DatabaseReadOperation
   fun get(
     entityClass: KClass<*>,
     id: String
   ): Any {
-    val graphqlRelayNodeManager = ArcService.get<GraphqlRelayNodeManager>()
     return graphqlRelayNodeManager.getEntityByNodeId(id)
       ?: throw RuntimeException("$entityClass doesn't exist with id $id")
   }
@@ -306,12 +333,16 @@ class UpdateStreamInput(/*...*/)
 
 ### Existing Entities by Natural or Composite Key
 
-An input does not have to contain the target entity ID. Add one or more typed lookup strategies to the mapper annotation.
-The generic arguments declare the input, target, lookup key, parent input, and parent target types. For example, a
+An input does not have to contain the target entity ID. Add one or more typed lookup strategies to the mapper
+annotation. The generic arguments declare the input, target, lookup key, parent input, and parent target types. For
+example, a
 `ContractSubject` can be found by the parent contract and the input `subjectId`:
 
 ```kotlin
-object ContractSubjectLookup :
+@ApplicationScoped
+class ContractSubjectLookup(
+  private val repository: ContractSubjectRepository,
+) :
   AutoMapBatchExistingEntityLookup<
     ContractSubjectInput,
     ContractSubjectEntity,
@@ -341,8 +372,6 @@ object ContractSubjectLookup :
       >,
   ): Map<UUID, ContractSubjectEntity> {
     val contract = requireNotNull(context.parentTarget)
-    val repository = context.getService(ContractSubjectRepository::class)
-
     return repository
       .findAllByContractAndSubjectIds(contract.id, keys)
       .associateBy { it.subject.id }
@@ -380,9 +409,10 @@ The default order is ID first and then custom strategies. Set `existingEntityLoo
 it. The default conflict policy is deterministic first-match behavior; `FAIL_ON_CONFLICT` evaluates all strategies and
 rejects different target instances.
 
-Lookup classes must be Kotlin `object`s. Their generic contracts, key type, parent types, and object instances are
-resolved when `AutoMapMapperBuilder` creates static mapper metadata. Quarkus also registers lookup classes for native
-reflection. Runtime resolution invokes prepared adapters and does not perform reflective target-type inspection.
+Lookup classes should be `@ApplicationScoped` and receive repositories or services through constructor injection. Kotlin
+`object` lookup classes remain supported.
+
+Lookup generic contracts, key types, and parent source/target types are validated before the application starts.
 
 ## Exception Handling
 
@@ -438,6 +468,8 @@ inline fun <TO : Any, reified T : AutoMapperSpecTo<TO>> AutoMapper.updateObjectB
 5. **Restrict allowed classes**: Always specify which entity classes can be created or updated
 6. **Validate inputs**: Perform validation before mapping to ensure data integrity
 7. **Use transactions**: Wrap mapping operations in transactions for data consistency
+8. **Prefer application-scoped components**: Use constructor-injected `@ApplicationScoped` classes for custom mapper
+   logic
 
 ## Contributing
 

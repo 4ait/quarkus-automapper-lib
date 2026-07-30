@@ -28,10 +28,46 @@ import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanGettersFields
 import ru.code4a.quarkus.automapper.utils.reflection.bean.getBeanSettersFields
 import ru.code4a.quarkus.automapper.validators.NotSpecifiedAutoMapFieldUpdateValidator
 import kotlin.reflect.KClass
+import kotlin.reflect.KParameter
 import kotlin.reflect.KType
 import kotlin.reflect.full.*
 
-class AutoMapMapperBuilder {
+class AutoMapMapperBuilder private constructor(
+  private val componentResolver: AutoMapComponentResolver,
+  private val prevalidatedLocatorKinds: Map<KClass<*>, AutoMapExistingEntityLocatorKind>?,
+  private val defaultConverterClassNames: List<String>?,
+) {
+
+  constructor() : this(AutoMapComponentResolver(), null, null)
+
+  internal constructor(cdiLookup: (KClass<*>) -> Any?) :
+    this(AutoMapComponentResolver(cdiLookup), null, null)
+
+  internal constructor(
+    cdiLookup: (KClass<*>) -> Any?,
+    prevalidatedLocatorKinds: Map<KClass<*>, AutoMapExistingEntityLocatorKind>,
+    defaultConverterClassNames: List<String>? = null,
+  ) : this(
+    AutoMapComponentResolver(cdiLookup),
+    prevalidatedLocatorKinds,
+    defaultConverterClassNames,
+  )
+
+  private val defaultConverters by lazy {
+    AutoMapTypeDefaultConverters(componentResolver)
+  }
+
+  private val defaultConvertersBlueprint by lazy {
+    AutoMapTypeDefaultConvertersBlueprint(defaultConverterClassNames)
+  }
+
+  private var activeBlueprintComponentReferences: AutoMapComponentReferences? = null
+
+  private fun blueprintComponentReferences(): AutoMapComponentReferences {
+    return checkNotNull(activeBlueprintComponentReferences) {
+      "CDI component references can only be prepared while a mapper blueprint is being built"
+    }
+  }
 
   private class MappingDirection(
     val inputKClass: KClass<*>,
@@ -324,13 +360,10 @@ class AutoMapMapperBuilder {
   }
 
   private fun AutoMapField.getNamingStrategyInstance(): AutoMapFieldNamingStrategy {
-    val objInstance = namingStrategy.objectInstance
-
-    if (objInstance == null) {
-      error("NamingStrategy must define object")
-    }
-
-    return objInstance
+    return componentResolver.resolveOrNull(namingStrategy)
+      ?: error(
+        "NamingStrategy must define object or be an @ApplicationScoped CDI bean: $namingStrategy"
+      )
   }
 
   private fun isFieldUpdateValidatorSpecified(autoMapFieldAnnotation: AutoMapField?): Boolean {
@@ -449,8 +482,9 @@ class AutoMapMapperBuilder {
     return AutoMapFieldUpdateValidatorInfo(
       fieldName = fieldName,
       validator =
-        updateValidatorClass.objectInstance.unwrapElseError {
-          "Update validator $updateValidatorClass should be object instance of AutoMapFieldUpdateValidator"
+        componentResolver.resolveOrNull(updateValidatorClass).unwrapElseError {
+          "Update validator $updateValidatorClass should be object instance of AutoMapFieldUpdateValidator " +
+            "or an @ApplicationScoped CDI bean"
         } as AutoMapFieldUpdateValidator<Any, Any?, Any?, Any?>,
     )
   }
@@ -466,7 +500,8 @@ class AutoMapMapperBuilder {
     ) {
       val introspectedConverter =
         AutoMapTypeConverterIntrospector.introspect(
-          autoMapFieldAnnotation.typeConverter
+          typeConverterClass = autoMapFieldAnnotation.typeConverter,
+          componentResolver = componentResolver,
         )
 
       AutoMapTypeConverterIntrospector.requireCompatibility(
@@ -489,6 +524,7 @@ class AutoMapMapperBuilder {
       AutoMapConverterChainBuilder.build(
         fromType = fromType,
         toType = toType,
+        defaultConverters = defaultConverters,
         mapperSpec =
           autoMapFieldAnnotation
             ?.mapper
@@ -597,7 +633,7 @@ class AutoMapMapperBuilder {
 
         childInfo.existingEntityLocators.forEach { locator ->
           require(
-            locator.parentSourceType
+            locator.parentSourceType!!
               .withNullability(false)
               == parentInfo.inputKClass.starProjectedType
           ) {
@@ -605,7 +641,7 @@ class AutoMapMapperBuilder {
               "${locator.parentSourceType} is not compatible with ${parentInfo.inputKClass}"
           }
           require(
-            locator.parentTargetType
+            locator.parentTargetType!!
               .withNullability(false)
               == parentInfo.objectKClass.starProjectedType
           ) {
@@ -624,6 +660,637 @@ class AutoMapMapperBuilder {
     } else {
       typeClass.takeIf { it.findAnnotations(AutoMapObjectFromInput::class).isNotEmpty() }
     }
+  }
+
+  private fun resolveFieldNamesBlueprint(
+    autoMapFieldAnnotation: AutoMapField?,
+    inputFieldName: String,
+  ): AutoMapBinding<ResolvedFieldNames> {
+    if (autoMapFieldAnnotation == null) {
+      return AutoMapBinding.fixed(
+        ResolvedFieldNames(inputFieldName, inputFieldName, inputFieldName)
+      )
+    }
+
+    val resolvedNameBinding =
+      if (autoMapFieldAnnotation.fieldName.isNotEmpty()) {
+        AutoMapBinding.fixed(autoMapFieldAnnotation.fieldName)
+      } else {
+        @Suppress("UNCHECKED_CAST")
+        val strategyClass =
+          autoMapFieldAnnotation.namingStrategy as KClass<AutoMapFieldNamingStrategy>
+        componentBinding(
+          componentClass = strategyClass,
+          missingMessage = {
+            "NamingStrategy must define object or be an @ApplicationScoped CDI bean: $strategyClass"
+          },
+        ).map { strategy -> strategy.getObjectFieldName(inputFieldName) }
+      }
+
+    return resolvedNameBinding.map { resolvedName ->
+      ResolvedFieldNames(
+        setterName = autoMapFieldAnnotation.setterFieldName.ifEmpty { resolvedName },
+        getterName = autoMapFieldAnnotation.getterFieldName.ifEmpty { resolvedName },
+        constructParameterName = autoMapFieldAnnotation.constructParameterName.ifEmpty { resolvedName },
+      )
+    }
+  }
+
+  private fun getFieldUpdateValidatorInfoBlueprint(
+    autoMapFieldAnnotation: AutoMapField?,
+    fieldName: String,
+    mapperKClass: KClass<*>,
+    parentKClass: KClass<*>,
+    currentType: KType,
+    newType: KType,
+    inputType: KType,
+  ): AutoMapBinding<AutoMapFieldUpdateValidatorInfo?> {
+    if (!isFieldUpdateValidatorSpecified(autoMapFieldAnnotation)) {
+      return AutoMapBinding.fixed(null)
+    }
+
+    val updateValidatorClass =
+      autoMapFieldAnnotation?.updateValidatorClass.unwrapElseError {
+        "Update validator must be present for field '$fieldName' in mapper $mapperKClass"
+      }
+    val genericTypes = getFieldUpdateValidatorGenericTypes(updateValidatorClass)
+
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass,
+      mapperKClass,
+      fieldName,
+      "parent",
+      genericTypes.parentType,
+      parentKClass.starProjectedType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass,
+      mapperKClass,
+      fieldName,
+      "currentValue",
+      genericTypes.currentType,
+      currentType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass,
+      mapperKClass,
+      fieldName,
+      "newValue",
+      genericTypes.newType,
+      newType,
+    )
+    requireFieldUpdateValidatorTypeCompatibility(
+      updateValidatorClass,
+      mapperKClass,
+      fieldName,
+      "inputValue",
+      genericTypes.inputType,
+      inputType,
+    )
+
+    @Suppress("UNCHECKED_CAST")
+    val typedValidatorClass =
+      updateValidatorClass as KClass<AutoMapFieldUpdateValidator<Any, Any?, Any?, Any?>>
+    val validatorReference =
+      blueprintComponentReferences().reference(
+        componentClass = typedValidatorClass,
+        missingMessage = {
+          "Update validator $updateValidatorClass should be an object instance or an @ApplicationScoped CDI bean"
+        },
+      )
+    val adapter =
+      object : AutoMapFieldUpdateValidator<Any, Any?, Any?, Any?> {
+        override fun validate(
+          parent: Any,
+          currentValue: Any?,
+          newValue: Any?,
+          inputValue: Any?,
+          fieldName: String,
+        ) {
+          validatorReference.get().validate(parent, currentValue, newValue, inputValue, fieldName)
+        }
+      }
+    return AutoMapBinding.fixed(
+      AutoMapFieldUpdateValidatorInfo(fieldName = fieldName, validator = adapter)
+    )
+  }
+
+  private fun getValueConverterBlueprint(
+    autoMapFieldAnnotation: AutoMapField?,
+    fromType: KType,
+    toType: KType,
+  ): AutoMapBinding<AutoMapDynConverter> {
+    if (
+      autoMapFieldAnnotation != null &&
+      autoMapFieldAnnotation.typeConverter != NotSpecifiedAutoMapTypeConverter::class
+    ) {
+      val converterClass = autoMapFieldAnnotation.typeConverter
+      val contract = AutoMapTypeConverterIntrospector.introspectContract(converterClass)
+      AutoMapTypeConverterIntrospector.requireCompatibility(
+        typeConverterClass = converterClass,
+        fromType = fromType,
+        toType = toType,
+        contract = contract,
+      )
+
+      @Suppress("UNCHECKED_CAST")
+      val typedConverterClass = converterClass as KClass<AutoMapTypeConverter<Any?, Any?>>
+      val converterReference =
+        blueprintComponentReferences().reference(
+          componentClass = typedConverterClass,
+          allowNoArgConstruction = true,
+          missingMessage = { "Cannot resolve converter $converterClass" },
+        )
+      return AutoMapBinding.fixed(
+        AutoMapDynConverter { _, _, _, _, input -> converterReference.get().convert(input) }
+      )
+    }
+
+    return AutoMapConverterChainBuilder.buildBlueprint(
+      fromType = fromType,
+      toType = toType,
+      defaultConverters = defaultConvertersBlueprint,
+      componentReferences = blueprintComponentReferences(),
+      mapperSpec =
+        autoMapFieldAnnotation
+          ?.mapper
+          ?.takeUnless { mapper -> mapper == Object::class },
+    )
+  }
+
+  private fun buildInputCreateInfoBlueprint(
+    objectKClass: KClass<*>,
+    inputKClass: KClass<*>,
+    mapperKClass: KClass<*>,
+    annotation: AutoMapObjectFromInput,
+    inputGetterFields: List<KotlinBeanField>,
+  ): AutoMapBinding<InputCreateInfo> {
+    val entityCompanionObjectClass =
+      objectKClass.companionObject
+        ?: error("Entity class $objectKClass should have Companion object for construct")
+    val constructMethod =
+      entityCompanionObjectClass.declaredFunctions
+        .find { it.name == annotation.constructMethod }
+        .unwrapElseError {
+          "Cannot find method ${annotation.constructMethod} inside object cass $entityCompanionObjectClass"
+        }
+    val parametersByName = constructMethod.valueParameters.associateBy { it.name }
+
+    val createFieldBindings =
+      mapperKClass
+        .getBeanGettersFields()
+        .filter { annotation.idField != it.name }
+        .map { mapperGetterField ->
+          val inputGetterField =
+            inputGetterFields.find { it.name == mapperGetterField.name }
+              .unwrapElseError {
+                "Cannot find getter field for ${mapperGetterField.name}. " +
+                  "\nMapper: $mapperKClass\nInput $inputKClass\nOutput: $objectKClass"
+              }
+          val fieldAnnotation =
+            mapperGetterField.function.findAnnotations(AutoMapField::class).firstOrNull()
+          val namesBinding = resolveFieldNamesBlueprint(fieldAnnotation, inputGetterField.name)
+
+          fun candidate(parameter: KParameter): AutoMapBinding<InputCreateFieldInfo> {
+            val parameterName = checkNotNull(parameter.name)
+            return getValueConverterBlueprint(
+              autoMapFieldAnnotation = fieldAnnotation,
+              fromType = inputGetterField.function.returnType,
+              toType = parameter.type,
+            ).map { converter ->
+              InputCreateFieldInfo(parameterName, inputGetterField, converter)
+            }
+          }
+
+          if (namesBinding.isFixed) {
+            val names = namesBinding.fixedValue()
+            val parameter = parametersByName[names.constructParameterName]
+              .unwrapElseError {
+                "Cannot find parameter \"${names.constructParameterName}\" in constructor of " +
+                  "$objectKClass (mapper $mapperKClass, input $inputKClass)"
+              }
+            candidate(parameter)
+          } else {
+            val candidates =
+              constructMethod.valueParameters.associate { parameter ->
+                checkNotNull(parameter.name) to
+                  prepareBlueprintCandidate { candidate(parameter) }
+              }
+            AutoMapBinding.dynamic(
+              namesBinding.componentClasses +
+                candidates.values.flatMapTo(linkedSetOf()) { it.componentClasses }
+            ) { resolver ->
+              val names = namesBinding.bind(resolver)
+              candidates[names.constructParameterName]
+                .unwrapElseError {
+                  "Cannot find parameter \"${names.constructParameterName}\" in constructor of " +
+                    "$objectKClass (mapper $mapperKClass, input $inputKClass)"
+                }
+                .bind(resolver)
+            }
+          }
+        }
+
+    return combineBindings(createFieldBindings) { createFields ->
+      constructMethod.valueParameters
+        .filter { parameter -> !parameter.isOptional }
+        .forEach { parameter ->
+          createFields.find { it.constructParameterName == parameter.name }
+            .unwrapElseError {
+              "Cannot find required field \"$parameter\" in \n$inputKClass for construct " +
+                "\n$objectKClass (mapper \n$mapperKClass)"
+            }
+        }
+
+      InputCreateInfo(
+        constructorObject = entityCompanionObjectClass.objectInstance,
+        constructMethod = constructMethod,
+        createFields = createFields,
+        createFieldsByName = createFields.associateBy(InputCreateFieldInfo::constructParameterName),
+      )
+    }
+  }
+
+  private fun <T> deferredBlueprintFailure(failure: Throwable): AutoMapBinding<T> {
+    val message = failure.message ?: "Cannot bind mapper blueprint"
+    return AutoMapBinding.dynamic { throw IllegalArgumentException(message) }
+  }
+
+  private inline fun <T> prepareBlueprintCandidate(
+    factory: () -> AutoMapBinding<T>,
+  ): AutoMapBinding<T> {
+    return try {
+      factory()
+    } catch (failure: RuntimeException) {
+      deferredBlueprintFailure(failure)
+    }
+  }
+
+  private fun buildObjectByIdGetterBlueprint(
+    objectGetterClass: KClass<*>,
+    objectKClass: KClass<*>,
+    idGetterField: KotlinBeanField?,
+  ): AutoMapBinding<ObjectByIdGetter?> {
+    if (objectGetterClass == Object::class) return AutoMapBinding.fixed(null)
+
+    val contract = AutoMapObjectGetterIntrospector.introspectContract(objectGetterClass)
+    idGetterField?.let { field ->
+      AutoMapObjectGetterIntrospector.requireCompatibility(
+        objectGetterClass = objectGetterClass,
+        objectKClass = objectKClass,
+        idType = field.function.returnType,
+        introspectedGetter = contract,
+      )
+    }
+    @Suppress("UNCHECKED_CAST")
+    val typedGetterClass = objectGetterClass as KClass<Any>
+    val getterReference =
+      blueprintComponentReferences().reference(
+        componentClass = typedGetterClass,
+        missingMessage = {
+          "Object Instance must be present for class $objectGetterClass unless it is an @ApplicationScoped CDI bean"
+        },
+      )
+    return AutoMapBinding.fixed(
+      ObjectByIdGetter { id ->
+        contract.getterFunction.call(getterReference.get(), objectKClass, id)
+      }
+    )
+  }
+
+  private fun buildObjectFieldUpdaterCandidateBlueprint(
+    objectKClass: KClass<*>,
+    inputKClass: KClass<*>,
+    mapperKClass: KClass<*>,
+    fieldAnnotation: AutoMapField?,
+    inputGetterField: KotlinBeanField,
+    objectGetter: KotlinBeanField,
+    objectSetter: KotlinBeanField?,
+    missingSetterName: String,
+  ): AutoMapBinding<ObjectFieldByInput> {
+    val inputClassName = inputKClass.getReadableName()
+    if (objectSetter == null) {
+      if (objectGetter.function.returnType.findAnnotations(AutoMapObjectFromInput::class).isEmpty()) {
+        return AutoMapBinding.dynamic {
+          throw IllegalArgumentException(
+            "Missing required setter method '$missingSetterName' for class '$objectKClass'. \n" +
+              "The field from input class '$inputKClass' cannot be updated because it has no setter and is not nested."
+          )
+        }
+      }
+      if (isFieldUpdateValidatorSpecified(fieldAnnotation)) {
+        return AutoMapBinding.dynamic {
+          throw IllegalArgumentException(
+            "Field update validator ${fieldAnnotation?.updateValidatorClass} cannot be used for " +
+              "field '${inputGetterField.name}' in mapper $mapperKClass without a setter"
+          )
+        }
+      }
+      val mapperGetter =
+        if (fieldAnnotation == null || fieldAnnotation.mapper == Object::class) {
+          { inputValue: Any -> inputValue::class }
+        } else {
+          { _: Any -> fieldAnnotation.mapper }
+        }
+
+      return AutoMapBinding.fixed(
+        ObjectFieldByInput(
+          inputGetterField = inputGetterField,
+          updater = ObjectFieldByInputUpdater { autoMapper,
+                                                allowedCreationObjectClasses,
+                                                allowedUpdateObjectClasses,
+                                                mappingContext,
+                                                _,
+                                                obj,
+                                                inputValue ->
+            if (inputValue == null) {
+              throw FieldCannotBeNullInputAutomapperException(inputGetterField.name, inputClassName)
+            }
+            val existingValue =
+              objectGetter.function.call(obj)
+                ?: throw CannotUpdateEntityInEmptyFieldInputAutomapperException(
+                  inputGetterField.name,
+                  inputClassName,
+                )
+            autoMapper.internalUpdateObjectByInput(
+              mapperSpec = mapperGetter(inputValue),
+              allowedCreationObjectClasses = allowedCreationObjectClasses,
+              allowedUpdateObjectClasses = allowedUpdateObjectClasses,
+              input = inputValue,
+              obj = existingValue,
+              parentContext = mappingContext,
+            )
+          },
+        )
+      )
+    }
+
+    val setterParameter = objectSetter.function.valueParameters[0]
+    val setterType = setterParameter.type
+    val converterBinding =
+      getValueConverterBlueprint(
+        autoMapFieldAnnotation = fieldAnnotation,
+        fromType = inputGetterField.function.returnType,
+        toType = setterType,
+      )
+    val validatorBinding =
+      getFieldUpdateValidatorInfoBlueprint(
+        autoMapFieldAnnotation = fieldAnnotation,
+        fieldName = inputGetterField.name,
+        mapperKClass = mapperKClass,
+        parentKClass = objectKClass,
+        currentType = objectGetter.function.returnType,
+        newType = setterType,
+        inputType = inputGetterField.function.returnType,
+      )
+
+    return converterBinding.zip(validatorBinding) { converter, validator ->
+      ObjectFieldByInput(
+        inputGetterField = inputGetterField,
+        updater = ObjectFieldByInputUpdater { autoMapper,
+                                              allowedCreationObjectClasses,
+                                              allowedUpdateObjectClasses,
+                                              mappingContext,
+                                              _,
+                                              obj,
+                                              inputValue ->
+          if (inputValue == null && !setterType.isMarkedNullable) {
+            throw FieldCannotBeNullInputAutomapperException(inputGetterField.name, inputClassName)
+          }
+          val currentValue = objectGetter.function.call(obj)
+          val entityValue =
+            converter.convert(
+              autoMapper,
+              allowedCreationObjectClasses,
+              allowedUpdateObjectClasses,
+              mappingContext,
+              inputValue,
+            )
+          validator?.validate(obj, currentValue, entityValue, inputValue)
+          objectSetter.function.call(obj, entityValue)
+        },
+      )
+    }
+  }
+
+  private fun buildObjectByInputUpdaterBlueprint(
+    objectKClass: KClass<*>,
+    annotation: AutoMapObjectFromInput,
+    inputKClass: KClass<*>,
+    mapperKClass: KClass<*>,
+  ): AutoMapBinding<ObjectByInputUpdater> {
+    val objectGetters = objectKClass.getBeanGettersFields().associateBy(KotlinBeanField::name)
+    val objectSetters = objectKClass.getBeanSettersFields().associateBy(KotlinBeanField::name)
+    val inputGetters = inputKClass.getBeanGettersFields().associateBy(KotlinBeanField::name)
+
+    val fieldBindings =
+      mapperKClass.getBeanGettersFields()
+        .filter { it.name != annotation.idField }
+        .map { mapperGetterField ->
+          val fieldAnnotation =
+            mapperGetterField.function.findAnnotations(AutoMapField::class).firstOrNull()
+          val inputGetter = inputGetters[mapperGetterField.name]
+            .unwrapElseError {
+              "Cannot find field ${mapperGetterField.name} in $inputKClass (mapper $mapperKClass)"
+            }
+          val namesBinding = resolveFieldNamesBlueprint(fieldAnnotation, inputGetter.name)
+
+          fun candidate(
+            getter: KotlinBeanField,
+            setter: KotlinBeanField?,
+            missingSetterName: String,
+          ): AutoMapBinding<ObjectFieldByInput> =
+            buildObjectFieldUpdaterCandidateBlueprint(
+              objectKClass,
+              inputKClass,
+              mapperKClass,
+              fieldAnnotation,
+              inputGetter,
+              getter,
+              setter,
+              missingSetterName,
+            )
+
+          if (namesBinding.isFixed) {
+            val names = namesBinding.fixedValue()
+            val getter = objectGetters[names.getterName]
+              ?: throw FieldCannotBeUpdatedInputAutomapperException(
+                inputGetter.name,
+                inputKClass.getReadableName(),
+              )
+            candidate(getter, objectSetters[names.setterName], names.setterName)
+          } else {
+            val explicitGetterName = fieldAnnotation?.getterFieldName?.takeIf(String::isNotEmpty)
+            val explicitSetterName = fieldAnnotation?.setterFieldName?.takeIf(String::isNotEmpty)
+            val candidateBindings = mutableMapOf<Pair<String, String?>, AutoMapBinding<ObjectFieldByInput>>()
+
+            if (explicitGetterName != null) {
+              val getter = objectGetters[explicitGetterName]
+                ?: throw FieldCannotBeUpdatedInputAutomapperException(
+                  inputGetter.name,
+                  inputKClass.getReadableName(),
+                )
+              if (explicitSetterName != null) {
+                val setter = objectSetters[explicitSetterName]
+                candidateBindings[getter.name to setter?.name] =
+                  prepareBlueprintCandidate { candidate(getter, setter, explicitSetterName) }
+              } else {
+                objectSetters.values.forEach { setter ->
+                  candidateBindings[getter.name to setter.name] =
+                    prepareBlueprintCandidate { candidate(getter, setter, setter.name) }
+                }
+                candidateBindings[getter.name to null] =
+                  prepareBlueprintCandidate { candidate(getter, null, getter.name) }
+              }
+            } else {
+              objectGetters.values.forEach { getter ->
+                val setter =
+                  if (explicitSetterName != null) objectSetters[explicitSetterName]
+                  else objectSetters[getter.name]
+                candidateBindings[getter.name to setter?.name] =
+                  prepareBlueprintCandidate {
+                    candidate(getter, setter, explicitSetterName ?: getter.name)
+                  }
+              }
+            }
+
+            AutoMapBinding.dynamic(
+              namesBinding.componentClasses +
+                candidateBindings.values.flatMapTo(linkedSetOf()) { it.componentClasses }
+            ) { resolver ->
+              val names = namesBinding.bind(resolver)
+              val getter = objectGetters[names.getterName]
+                ?: throw FieldCannotBeUpdatedInputAutomapperException(
+                  inputGetter.name,
+                  inputKClass.getReadableName(),
+                )
+              val setter = objectSetters[names.setterName]
+              candidateBindings[getter.name to setter?.name]
+                .unwrapElseError {
+                  "Cannot bind update metadata for field ${inputGetter.name} in mapper $mapperKClass"
+                }
+                .bind(resolver)
+            }
+          }
+        }
+
+    return combineBindings(fieldBindings) { fields ->
+      ObjectByInputUpdater { autoMapper,
+                             allowedCreationObjectClasses,
+                             allowedUpdateObjectClasses,
+                             mappingContext,
+                             obj,
+                             input ->
+        fields.forEach { field ->
+          val inputValue = field.inputGetterField.function.call(input)
+          field.updater.updateField(
+            autoMapper,
+            allowedCreationObjectClasses,
+            allowedUpdateObjectClasses,
+            mappingContext,
+            field.inputGetterField,
+            obj,
+            inputValue,
+          )
+        }
+      }
+    }
+  }
+
+  /** Builds reflection-free runtime binders for mapper specs that depend on CDI. */
+  internal fun buildBlueprint(mapperAutomapClasses: List<Class<*>>): AutoMapperBlueprint {
+    check(prevalidatedLocatorKinds != null) {
+      "Runtime mapper blueprints require build-time validated existing-entity locator contracts"
+    }
+
+    val preparedMappers =
+      mapperAutomapClasses.associateWith { mapperClass ->
+        val componentReferences = AutoMapComponentReferences()
+        check(activeBlueprintComponentReferences == null) {
+          "Mapper blueprints must be built sequentially"
+        }
+        activeBlueprintComponentReferences = componentReferences
+        try {
+          val mapperKClass = mapperClass.kotlin
+          val direction = getMappingDirectionFromMapperSpec(mapperKClass)
+          val objectKClass = direction.objectKClass
+          val inputGetterFields = direction.inputKClass.getBeanGettersFields()
+          val annotation =
+            mapperKClass.findAnnotations(AutoMapObjectFromInput::class).firstOrNull()
+              .unwrapElseError {
+                "Mapper class $mapperKClass must be annotated with @${AutoMapObjectFromInput::class}"
+              }
+          val idGetterField =
+            mapperKClass.getBeanGettersFields()
+              .find { it.name == annotation.idField }
+              ?.let { mapperField ->
+                inputGetterFields.find { it.name == mapperField.name }
+                  .unwrapElseError { "Cannot find field ${mapperField.name} in ${direction.inputKClass}" }
+              }
+
+        val createInfoBinding: AutoMapBinding<InputCreateInfo?> =
+          if (annotation.allowCreate) {
+            buildInputCreateInfoBlueprint(
+              objectKClass,
+              direction.inputKClass,
+              mapperKClass,
+              annotation,
+              inputGetterFields,
+            ).map { it }
+          } else {
+            AutoMapBinding.fixed(null)
+          }
+        val objectGetterBinding =
+          buildObjectByIdGetterBlueprint(annotation.objectGetterClass, objectKClass, idGetterField)
+        val updaterBinding: AutoMapBinding<ObjectByInputUpdater?> =
+          if (annotation.allowUpdate) {
+            buildObjectByInputUpdaterBlueprint(
+              objectKClass,
+              annotation,
+              direction.inputKClass,
+              mapperKClass,
+            ).map { it }
+          } else {
+            AutoMapBinding.fixed(null)
+          }
+        val locatorBindings =
+          annotation.existingEntityLookupClasses.map { locatorClass ->
+            AutoMapExistingEntityLocatorIntrospector.blueprint(
+              locatorClass = locatorClass,
+              inputKClass = direction.inputKClass,
+              targetKClass = objectKClass,
+              prevalidatedKind = prevalidatedLocatorKinds[locatorClass],
+              componentReferences = blueprintComponentReferences(),
+            ).binding()
+          }
+        val locatorsBinding = combineBindings(locatorBindings) { it }
+
+          val inputClassInfoBinding =
+            createInfoBinding
+              .zip(objectGetterBinding) { createInfo, objectGetter -> createInfo to objectGetter }
+              .zip(updaterBinding) { (createInfo, objectGetter), updater ->
+                Triple(createInfo, objectGetter, updater)
+              }
+              .zip(locatorsBinding) { (createInfo, objectGetter, updater), locators ->
+                InputClassInfo(
+                  inputKClass = direction.inputKClass,
+                  objectKClass = objectKClass,
+                  objectByInputUpdater = updater,
+                  autoMapObjectFromInputAnnotation = annotation,
+                  idGetterField = idGetterField,
+                  inputCreateInfo = createInfo,
+                  objectByIdGetter = objectGetter,
+                  existingEntityLocators = locators,
+                  batchExistingEntityLocators = locators.filterIsInstance<BatchExistingEntityLocatorInfo>(),
+                )
+              }
+          AutoMapPreparedMapperBlueprint(inputClassInfoBinding, componentReferences)
+        } finally {
+          activeBlueprintComponentReferences = null
+        }
+      }
+
+    return AutoMapperBlueprint(preparedMappers)
   }
 
   fun build(mapperAutomapClasses: List<Class<*>>): AutoMapper {
@@ -767,7 +1434,8 @@ class AutoMapMapperBuilder {
             } else {
               val introspectedGetter =
                 AutoMapObjectGetterIntrospector.introspect(
-                  autoMapEntityFromInputAnnotation.objectGetterClass
+                  objectGetterClass = autoMapEntityFromInputAnnotation.objectGetterClass,
+                  componentResolver = componentResolver,
                 )
 
               idGetterField?.let { field ->
@@ -809,6 +1477,8 @@ class AutoMapMapperBuilder {
               locatorClass = lookupClass,
               inputKClass = mappingDirection.inputKClass,
               targetKClass = objectKClass,
+              componentResolver = componentResolver,
+              prevalidatedKind = prevalidatedLocatorKinds?.get(lookupClass),
             )
           }
 
@@ -825,10 +1495,15 @@ class AutoMapMapperBuilder {
         )
       }
 
-    validateExistingEntityLocatorParentTypes(inputClassesInfoByMapperSpecClass)
+    if (prevalidatedLocatorKinds == null) {
+      validateExistingEntityLocatorParentTypes(inputClassesInfoByMapperSpecClass)
+    }
 
     return AutoMapper(
-      inputClassesInfoByMapperSpecClass = inputClassesInfoByMapperSpecClass
+      inputClassInfoProvidersByMapperSpecClass =
+        inputClassesInfoByMapperSpecClass.mapValues { (_, info) ->
+          fixedInputClassInfoProvider(info)
+        }
     )
   }
 }

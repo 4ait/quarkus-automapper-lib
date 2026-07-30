@@ -15,8 +15,17 @@ import kotlin.reflect.KClass
 import kotlin.reflect.KParameter
 
 class AutoMapper internal constructor(
-  private val inputClassesInfoByMapperSpecClass: Map<Class<*>, InputClassInfo>
+  internal val inputClassInfoProvidersByMapperSpecClass:
+    Map<Class<*>, AutoMapInputClassInfoProvider>,
 ) {
+
+  private fun getInputClassInfo(mapperSpec: KClass<*>): InputClassInfo {
+    val mapperClass = mapperSpec.java
+    return (
+      inputClassInfoProvidersByMapperSpecClass[mapperClass]
+        ?: error("Cannot find input info for mapper spec $mapperClass")
+      ).get() as InputClassInfo
+  }
 
   fun <TO : Any, FROM : Any, T : AutoMapperSpec<FROM, TO>> createOrUpdateObjectByInput(
     mapperSpec: KClass<T>,
@@ -93,9 +102,7 @@ class AutoMapper internal constructor(
     input: Any,
     parentContext: AutoMapMappingFrame? = null,
   ): Any {
-    val inputClassInfo =
-      inputClassesInfoByMapperSpecClass[mapperSpec.java]
-        ?: error("Cannot find input info for mapper spec ${mapperSpec.java}")
+    val inputClassInfo = getInputClassInfo(mapperSpec)
 
     val mappingContext =
       AutoMapMappingFrame(
@@ -320,9 +327,7 @@ class AutoMapper internal constructor(
   ) {
     if (inputs.isEmpty()) return
 
-    val inputClassInfo =
-      inputClassesInfoByMapperSpecClass[mapperSpec.java]
-        ?: error("Cannot find input info for mapper spec ${mapperSpec.java}")
+    val inputClassInfo = getInputClassInfo(mapperSpec)
     val annotation = inputClassInfo.autoMapObjectFromInputAnnotation
     val batchLocators = inputClassInfo.batchExistingEntityLocators
 
@@ -395,8 +400,7 @@ class AutoMapper internal constructor(
     obj: Any,
     parentContext: AutoMapMappingFrame? = null,
   ) {
-    val inputClassInfo = inputClassesInfoByMapperSpecClass[mapperSpec.java]
-      ?: error("Cannot find input info for mapper spec ${mapperSpec.java}")
+    val inputClassInfo = getInputClassInfo(mapperSpec)
     val mappingContext =
       AutoMapMappingFrame(
         source = input,
@@ -428,8 +432,7 @@ class AutoMapper internal constructor(
       error("Access to update ${obj::class} is denied")
     }
 
-    val inputClassInfo = inputClassesInfoByMapperSpecClass[mapperSpec.java]
-      ?: error("Cannot find input info for mapper spec ${mapperSpec.java}")
+    val inputClassInfo = getInputClassInfo(mapperSpec)
 
     inputClassInfo
       .objectByInputUpdater
